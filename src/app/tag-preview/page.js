@@ -1,16 +1,26 @@
 "use client";
 
-import { useEffect, useState } from "react";
+import { useEffect, useState, Suspense } from "react";
 import QRCode from "react-qr-code";
 import { useSearchParams } from "next/navigation";
 
-export default function TagPreviewPage() {
+// Next ko bolo: is page ko hamesha dynamic treat karo
+// (static prerender / export ki koshish mat karo)
+export const dynamic = "force-dynamic";
+
+function TagPreviewInner() {
   const searchParams = useSearchParams();
   const [mounted, setMounted] = useState(false);
 
-  useEffect(() => setMounted(true), []);
   useEffect(() => {
-    if (mounted) window.print();
+    setMounted(true);
+  }, []);
+
+  // page mount hone ke baad hi print dialog khole
+  useEffect(() => {
+    if (mounted) {
+      window.print();
+    }
   }, [mounted]);
 
   const itemId = searchParams.get("itemId") || "";
@@ -43,21 +53,14 @@ export default function TagPreviewPage() {
           height: "12mm",
           background: "#ffffff",
           display: "flex",
-          // thoda kam padding, taaki content 12mm ke andar safe rahe
-          padding: "0.25mm 0.6mm",
+          padding: "0.5mm 1mm",
           fontFamily: "Arial, sans-serif",
           color: "#000",
           boxSizing: "border-box",
         }}
       >
-        {/* Left + Right 50mm area */}
-        <div
-          style={{
-            width: "50mm",
-            height: "11.5mm", // 12mm se thoda kam, vertical centre ke liye
-            display: "flex",
-          }}
-        >
+        {/* Total 50mm printable area (25mm + 25mm) */}
+        <div style={{ width: "50mm", height: "11mm", display: "flex" }}>
           {/* LEFT 25mm */}
           <div
             style={{
@@ -66,12 +69,12 @@ export default function TagPreviewPage() {
               flexDirection: "row",
             }}
           >
-            {/* QR */}
+            {/* QR (11.5mm approx, thoda margin with padding) */}
             <div
               style={{
-                width: "11.5mm",
-                height: "11.5mm",
-                padding: "0.25mm", // teen side ~0.25mm margin
+                width: "12mm",
+                height: "11mm",
+                padding: "0.3mm",
                 boxSizing: "border-box",
               }}
             >
@@ -82,13 +85,12 @@ export default function TagPreviewPage() {
               />
             </div>
 
-            {/* Text Block */}
+            {/* ANNVI GOLD + karat + D.No */}
             <div
               style={{
                 display: "flex",
                 flexDirection: "column",
                 paddingLeft: "0.5mm",
-                justifyContent: "center",
               }}
             >
               <span
@@ -138,31 +140,42 @@ export default function TagPreviewPage() {
               flexDirection: "column",
               justifyContent: "flex-start",
               paddingLeft: "1mm",
-              paddingTop: "0.2mm", // halkasa upar se offset
+              paddingTop: "0mm",
             }}
           >
             <span
               style={{
                 fontSize: "7pt",
                 fontWeight: "bold",
-                lineHeight: "1.0",
-                marginBottom: "0.1mm",
+                marginBottom: "0.2mm",
               }}
             >
               {itemId}
             </span>
             <span
-              style={{ fontSize: "7pt", fontWeight: "bold", lineHeight: "1.0" }}
+              style={{
+                fontSize: "7pt",
+                fontWeight: "bold",
+                lineHeight: "1.0",
+              }}
             >
               G.Wt: {grossWt} g
             </span>
             <span
-              style={{ fontSize: "7pt", fontWeight: "bold", lineHeight: "1.0" }}
+              style={{
+                fontSize: "7pt",
+                fontWeight: "bold",
+                lineHeight: "1.0",
+              }}
             >
               L.Wt: {lessWt} g
             </span>
             <span
-              style={{ fontSize: "7pt", fontWeight: "bold", lineHeight: "1.0" }}
+              style={{
+                fontSize: "7pt",
+                fontWeight: "bold",
+                lineHeight: "1.0",
+              }}
             >
               N.Wt: {netWt} g
             </span>
@@ -170,5 +183,14 @@ export default function TagPreviewPage() {
         </div>
       </div>
     </>
+  );
+}
+
+export default function TagPreviewPage() {
+  // useSearchParams hook ko Suspense ke ander rakhna mandatory hai
+  return (
+    <Suspense fallback={null}>
+      <TagPreviewInner />
+    </Suspense>
   );
 }
