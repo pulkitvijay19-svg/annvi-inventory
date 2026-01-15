@@ -3,7 +3,9 @@
 import { useEffect, useMemo, useState } from "react";
 import QRCode from "react-qr-code";
 import { supabase } from "@/lib/supabaseClient";
-import { useRequireLogin } from "@/lib/useRequireLogin"; // login check
+import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
+import { useRouter } from "next/navigation";
+
 
 const STORAGE_KEY = "annvi_items_v1";
 
@@ -164,7 +166,7 @@ function openTagPreview(item) {
 
 export default function AddPage() {
   useRequireLogin(); // login guard
-
+  const router = useRouter();
   const [items, setItems] = useState([]);
   const [query, setQuery] = useState("");
   const [qrOpen, setQrOpen] = useState(null);
@@ -423,6 +425,14 @@ export default function AddPage() {
               </div>
 
               <div className="flex flex-col gap-2">
+                <button
+  type="button"
+  onClick={() => doLogout(router)}
+  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
+>
+  Logout
+</button>
+
                 <button
                   onClick={refreshFromCloud}
                   className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/30"

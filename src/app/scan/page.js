@@ -3,7 +3,8 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Html5Qrcode } from "html5-qrcode";
 import { supabase } from "@/lib/supabaseClient";
-import { useRequireLogin } from "@/lib/useRequireLogin";      // kush nai add kiya login page ke liye //
+import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
+import { useRouter } from "next/navigation";
 
 const STORAGE_KEY = "annvi_items_v1";
 
@@ -99,7 +100,8 @@ function format3(v) {
 }
 
 export default function ScanPage() {
-  useRequireLogin();                                  // kush nai add kiya login page ke liye //
+  useRequireLogin();           
+  const router = useRouter();                       // kush nai add kiya login page ke liye //
   const [searchId, setSearchId] = useState("");
   const [message, setMessage] = useState("");
   const [item, setItem] = useState(null);
@@ -289,6 +291,14 @@ export default function ScanPage() {
           </div>
 
           <div className="flex gap-3 mb-3">
+            <button
+  type="button"
+  onClick={() => doLogout(router)}
+  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
+>
+  Logout
+</button>
+
             <button
               onClick={startScan}
               disabled={busy}

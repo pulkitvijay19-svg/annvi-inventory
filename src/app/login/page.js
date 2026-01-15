@@ -1,86 +1,71 @@
 "use client";
 
 import { useEffect, useState } from "react";
-import { useRouter } from "next/navigation";
+import { useRouter, useSearchParams } from "next/navigation";
+import { isLoggedIn, savePin } from "@/lib/useRequireLogin";
 
-const EXPECTED_PIN = process.env.NEXT_PUBLIC_INVENTORY_PIN || "";
+const ACCESS_PIN = process.env.NEXT_PUBLIC_INVENTORY_PIN || "2828"; // jo tumne Vercel env me dala hai
 
 export default function LoginPage() {
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const next = searchParams.get("next") || "/add";
+
   const [pin, setPin] = useState("");
   const [error, setError] = useState("");
 
-  // Already logged in? Direct /add
+  // Agar already logged in ho to direct next pe bhej do
   useEffect(() => {
-    if (typeof window === "undefined") return;
-    const loggedIn = window.localStorage.getItem("annvi_logged_in") === "1";
-    if (loggedIn) router.replace("/add");
-  }, [router]);
+    if (isLoggedIn()) {
+      router.replace(next);
+    }
+  }, [router, next]);
 
   function handleSubmit(e) {
     e.preventDefault();
-    setError("");
-
-    if (!EXPECTED_PIN) {
-      setError("PIN is not configured. Contact admin.");
-      return;
-    }
-
-    if (pin.trim() === EXPECTED_PIN) {
-      if (typeof window !== "undefined") {
-        window.localStorage.setItem("annvi_logged_in", "1");
-      }
-      router.replace("/add");
+    if (pin === ACCESS_PIN) {
+      savePin(pin);
+      router.replace(next);
     } else {
-      setError("Galat PIN hai. Dobara try karo.");
+      setError("Wrong PIN. Try again.");
     }
   }
 
   return (
-    <main className="min-h-screen bg-black text-white flex items-center justify-center px-4">
-      <div className="w-full max-w-sm rounded-2xl border border-white/10 bg-white/5 p-6 shadow-lg">
-        <div className="mb-4 text-center">
-          <div className="text-xs tracking-[0.28em] text-white/60">
-            ANNVI GOLD
-          </div>
-          <h1 className="mt-2 text-2xl font-semibold">Inventory Login</h1>
-          <p className="mt-1 text-xs text-white/60">
-            Factory use only – enter access PIN.
-          </p>
-        </div>
-
-        <form onSubmit={handleSubmit} className="space-y-4">
-          <div>
-            <label className="text-sm text-white/70">Access PIN</label>
-            <input
-              type="password"
-              value={pin}
-              onChange={(e) => setPin(e.target.value)}
-              className="mt-1 w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/40"
-              placeholder="••••••"
-              autoFocus
-            />
-          </div>
-
-          {error && (
-            <div className="rounded-lg border border-red-500/60 bg-red-500/10 px-3 py-2 text-xs text-red-200">
-              {error}
-            </div>
-          )}
-
-          <button
-            type="submit"
-            className="w-full rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
-          >
-            Unlock Inventory
-          </button>
-        </form>
-
-        <p className="mt-4 text-[10px] text-center text-white/40">
-          TIP: PIN change karna ho to Vercel &amp; .env.local dono jagah update
-          karo.
+    <main className="min-h-screen flex items-center justify-center bg-black text-white">
+      <form
+        onSubmit={handleSubmit}
+        className="w-full max-w-xs rounded-2xl border border-white/15 bg-white/5 p-5"
+      >
+        <div className="text-xs tracking-widest text-white/60">ANNVI GOLD</div>
+        <h1 className="mt-1 text-xl font-semibold">Inventory Login</h1>
+        <p className="mt-1 text-xs text-white/50">
+          Factory use only — enter access PIN.
         </p>
-      </div>
+
+        <label className="mt-4 block text-xs text-white/70">
+          Access PIN
+          <input
+            type="password"
+            value={pin}
+            onChange={(e) => setPin(e.target.value)}
+            className="mt-1 w-full rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/40"
+          />
+        </label>
+
+        {error && (
+          <div className="mt-2 text-xs text-red-300">
+            {error}
+          </div>
+        )}
+
+        <button
+          type="submit"
+          className="mt-4 w-full rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+        >
+          Unlock Inventory
+        </button>
+      </form>
     </main>
   );
 }
