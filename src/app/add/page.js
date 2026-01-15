@@ -6,8 +6,64 @@ import { supabase } from "@/lib/supabaseClient";
 import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
 import { useRouter } from "next/navigation";
 
-
 const STORAGE_KEY = "annvi_items_v1";
+
+// ------- IMAGE COMPRESS HELPER (~100 KB target) -------
+async function compressImage(file, maxWidth = 900, quality = 0.7) {
+  return new Promise((resolve, reject) => {
+    const img = new Image();
+
+    img.onload = () => {
+      const canvas = document.createElement("canvas");
+
+      const ratio = img.width > maxWidth ? maxWidth / img.width : 1;
+      const w = img.width * ratio;
+      const h = img.height * ratio;
+
+      canvas.width = w;
+      canvas.height = h;
+
+      const ctx = canvas.getContext("2d");
+      if (!ctx) {
+        reject(new Error("Canvas context not available"));
+        return;
+      }
+
+      ctx.drawImage(img, 0, 0, w, h);
+
+      canvas.toBlob(
+        (blob) => {
+          if (!blob) {
+            reject(new Error("Image compression failed"));
+            return;
+          }
+
+          // agar size abhi bhi bahut bada hai to thoda aur compress
+          if (blob.size > 150 * 1024 && quality > 0.4) {
+            compressImage(file, maxWidth, quality - 0.1)
+              .then(resolve)
+              .catch(reject);
+          } else {
+            resolve(blob);
+          }
+        },
+        "image/jpeg",
+        quality
+      );
+    };
+
+    img.onerror = reject;
+
+    const reader = new FileReader();
+    reader.onload = (e) => {
+      img.src = e.target && e.target.result;
+    };
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
+// --------------- ID HELPERS ----------------
 
 function pad6(n) {
   return String(n).padStart(6, "0");
@@ -50,6 +106,7 @@ function toCloudRow(localItem) {
     net_wt: Number(localItem.netWt || 0),
     notes: localItem.notes || "",
     status: localItem.status,
+    image_url: localItem.imageUrl || null,
     created_at: localItem.createdAt,
     updated_at: localItem.updatedAt,
   };
@@ -104,6 +161,7 @@ async function cloudPullLatestAndMerge() {
     netWt: String(r.net_wt ?? ""),
     notes: r.notes ?? "",
     status: r.status ?? "IN_STOCK",
+    imageUrl: r.image_url ?? "",
     createdAt: r.created_at ?? new Date().toISOString(),
     updatedAt: r.updated_at ?? new Date().toISOString(),
   }));
@@ -182,7 +240,11 @@ export default function AddPage() {
     notes: "",
   });
 
-  // ✅ Initial load: local first, then cloud sync
+  // photo state
+  const [photoFile, setPhotoFile] = useState(null);
+  const [photoPreview, setPhotoPreview] = useState(null);
+
+  // Initial load: local first, then cloud sync
   useEffect(() => {
     let cancelled = false;
 
@@ -234,6 +296,25 @@ export default function AddPage() {
     setForm((p) => ({ ...p, [key]: value }));
   }
 
+  function onPhotoChange(e) {
+    const file = e.target.files && e.target.files[0];
+    if (!file) {
+      setPhotoFile(null);
+      setPhotoPreview((old) => {
+        if (old) URL.revokeObjectURL(old);
+        return null;
+      });
+      return;
+    }
+
+    setPhotoFile(file);
+    const url = URL.createObjectURL(file);
+    setPhotoPreview((old) => {
+      if (old) URL.revokeObjectURL(old);
+      return url;
+    });
+  }
+
   async function onSave(e) {
     e.preventDefault();
 
@@ -249,6 +330,7 @@ export default function AddPage() {
       netWt,
       notes: form.notes.trim(),
       status: "IN_STOCK",
+      imageUrl: "",
       createdAt: now,
       updatedAt: now,
     };
@@ -263,6 +345,11 @@ export default function AddPage() {
       lessWt: "",
       notes: "",
     });
+    setPhotoFile(null);
+    setPhotoPreview((old) => {
+      if (old) URL.revokeObjectURL(old);
+      return null;
+    });
 
     // CLOUD
     setCloudBusy(true);
@@ -275,8 +362,52 @@ export default function AddPage() {
         actor: "Factory",
         place: "Local",
       });
-      setCloudMsg(`Cloud saved ✅ (${itemId})`);
+
+      // photo upload
+      if (photoFile) {
+        setCloudMsg("Uploading photo...");
+
+        const compressed = await compressImage(photoFile);
+        const path = `items/${itemId}.jpg`;
+
+        const { error: uploadError } = await supabase.storage
+          .from("item-images")
+          .upload(path, compressed, {
+            upsert: true,
+            contentType: "image/jpeg",
+          });
+
+        if (uploadError) {
+          console.error(uploadError);
+          setCloudMsg("Photo upload failed ⚠ — item saved without image");
+        } else {
+          const { data } = supabase.storage
+            .from("item-images")
+            .getPublicUrl(path);
+
+          const imageUrl = (data && data.publicUrl) || "";
+
+          await supabase
+            .from("items")
+            .update({
+              image_url: imageUrl,
+              updated_at: new Date().toISOString(),
+            })
+            .eq("item_id", itemId);
+
+          setItems((prev) =>
+            prev.map((x) =>
+              x.itemId === itemId ? { ...x, imageUrl } : x
+            )
+          );
+
+          setCloudMsg(`Saved + photo uploaded ✅ (${itemId})`);
+        }
+      } else {
+        setCloudMsg(`Cloud saved ✅ (${itemId})`);
+      }
     } catch (err) {
+      console.error(err);
       setCloudMsg(`Cloud failed/offline ⚠️ (${itemId}) — local saved`);
     } finally {
       setCloudBusy(false);
@@ -321,7 +452,6 @@ export default function AddPage() {
     const ok2 = confirm("Pakka? Ye cloud se bhi delete karega.");
     if (!ok2) return;
 
-    // local se hatao
     setItems((prev) => prev.filter((x) => x.itemId !== itemId));
 
     setCloudBusy(true);
@@ -349,7 +479,6 @@ export default function AddPage() {
     const b = confirm("Pakka 100% sure? Ye undo nahi hoga.");
     if (!b) return;
 
-    // local wipe
     setItems([]);
     localStorage.removeItem(STORAGE_KEY);
 
@@ -426,12 +555,12 @@ export default function AddPage() {
 
               <div className="flex flex-col gap-2">
                 <button
-  type="button"
-  onClick={() => doLogout(router)}
-  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
->
-  Logout
-</button>
+                  type="button"
+                  onClick={() => doLogout(router)}
+                  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
+                >
+                  Logout
+                </button>
 
                 <button
                   onClick={refreshFromCloud}
@@ -553,6 +682,33 @@ export default function AddPage() {
               />
             </div>
 
+            <div>
+              <label className="text-sm text-white/70">
+                Photo (optional)
+              </label>
+              <input
+                type="file"
+                accept="image/*"
+                capture="environment"
+                onChange={onPhotoChange}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
+              />
+              {photoPreview ? (
+                <div className="mt-2 flex items-center gap-3">
+                  <div className="h-16 w-16 overflow-hidden rounded-lg border border-white/15 bg-black/40">
+                    <img
+                      src={photoPreview}
+                      alt="Preview"
+                      className="h-full w-full object-cover"
+                    />
+                  </div>
+                  <div className="text-xs text-white/50">
+                    Camera se li gayi image compress hogi (approx ~100 KB).
+                  </div>
+                </div>
+              ) : null}
+            </div>
+
             <button
               type="submit"
               className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90"
@@ -600,7 +756,6 @@ export default function AddPage() {
                         </span>
                       </div>
 
-                      {/* STATUS BUTTONS UNDER STATUS LINE, HORIZONTAL */}
                       <div className="mt-2 flex flex-wrap gap-2 text-xs">
                         <button
                           type="button"
@@ -626,8 +781,18 @@ export default function AddPage() {
                       </div>
                     </div>
 
-                    {/* RIGHT SIDE: QR + Print / Delete */}
+                    {/* RIGHT SIDE: image (if any) + QR + Print / Delete */}
                     <div className="flex flex-col items-end gap-2">
+                      {x.imageUrl ? (
+                        <div className="h-14 w-14 overflow-hidden rounded-lg border border-white/20 bg-black/40">
+                          <img
+                            src={x.imageUrl}
+                            alt={x.itemId}
+                            className="h-full w-full object-cover"
+                          />
+                        </div>
+                      ) : null}
+
                       <div
                         className="cursor-pointer rounded-lg bg-white p-2"
                         title="Tap to enlarge QR"
