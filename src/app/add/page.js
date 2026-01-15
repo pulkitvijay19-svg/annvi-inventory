@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useState } from "react";
 import QRCode from "react-qr-code";
 import { supabase } from "@/lib/supabaseClient";
+import { useRequireLogin } from "@/lib/useRequireLogin"; // login check
 
 const STORAGE_KEY = "annvi_items_v1";
 
@@ -162,6 +163,8 @@ function openTagPreview(item) {
 // -------------------------------------------------------
 
 export default function AddPage() {
+  useRequireLogin(); // login guard
+
   const [items, setItems] = useState([]);
   const [query, setQuery] = useState("");
   const [qrOpen, setQrOpen] = useState(null);
@@ -279,7 +282,7 @@ export default function AddPage() {
     }
   }
 
-  // status change from Add page (same as before, keep for convenience)
+  // status change from Add page
   async function setStatus(itemId, status) {
     const now = new Date().toISOString();
 
@@ -309,7 +312,7 @@ export default function AddPage() {
     }
   }
 
-  // ✅ NEW: delete single item (local + cloud)
+  // delete single item (local + cloud)
   async function deleteItem(itemId) {
     const ok1 = confirm(`Delete item ${itemId} from stock?`);
     if (!ok1) return;
@@ -335,7 +338,7 @@ export default function AddPage() {
     }
   }
 
-  // ✅ UPDATED: Clear Data = local + cloud wipe (testing)
+  // Clear Data = local + cloud wipe (testing)
   async function clearAll() {
     const a = confirm(
       "Ye action sab items delete karega (LOCAL + CLOUD). Mostly testing ke liye. Continue?"
@@ -573,7 +576,8 @@ export default function AddPage() {
                   className="rounded-xl border border-white/10 bg-black/30 p-3"
                 >
                   <div className="flex items-start justify-between gap-3">
-                    <div>
+                    {/* LEFT SIDE: details + status buttons */}
+                    <div className="flex-1">
                       <div className="text-sm text-white/60">ItemID</div>
                       <div className="text-lg font-semibold">{x.itemId}</div>
                       <div className="mt-1 text-sm text-white/70">
@@ -585,8 +589,34 @@ export default function AddPage() {
                           {x.status}
                         </span>
                       </div>
+
+                      {/* STATUS BUTTONS UNDER STATUS LINE, HORIZONTAL */}
+                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                        <button
+                          type="button"
+                          onClick={() => setStatus(x.itemId, "SOLD")}
+                          className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
+                        >
+                          SOLD
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setStatus(x.itemId, "RETURNED")}
+                          className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
+                        >
+                          RETURN
+                        </button>
+                        <button
+                          type="button"
+                          onClick={() => setStatus(x.itemId, "IN_STOCK")}
+                          className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
+                        >
+                          IN
+                        </button>
+                      </div>
                     </div>
 
+                    {/* RIGHT SIDE: QR + Print / Delete */}
                     <div className="flex flex-col items-end gap-2">
                       <div
                         className="cursor-pointer rounded-lg bg-white p-2"
@@ -596,42 +626,19 @@ export default function AddPage() {
                         <QRCode value={x.itemId} size={64} />
                       </div>
 
-                      <div className="flex flex-col gap-2">
+                      <div className="flex w-full flex-col gap-2">
                         <button
                           type="button"
                           onClick={() => openTagPreview(x)}
-                          className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
+                          className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
                         >
                           Print Tag
                         </button>
 
                         <button
                           type="button"
-                          onClick={() => setStatus(x.itemId, "SOLD")}
-                          className="rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
-                        >
-                          SOLD
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setStatus(x.itemId, "RETURNED")}
-                          className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/40"
-                        >
-                          RETURN
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setStatus(x.itemId, "IN_STOCK")}
-                          className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
-                        >
-                          IN
-                        </button>
-
-                        {/* delete button */}
-                        <button
-                          type="button"
                           onClick={() => deleteItem(x.itemId)}
-                          className="rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                          className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
                         >
                           DELETE
                         </button>

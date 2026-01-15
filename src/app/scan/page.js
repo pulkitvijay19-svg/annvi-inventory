@@ -3,6 +3,7 @@
 import { useEffect, useMemo, useRef, useState } from "react";
 import { Html5Qrcode } from "html5-qrcode";
 import { supabase } from "@/lib/supabaseClient";
+import { useRequireLogin } from "@/lib/useRequireLogin";      // kush nai add kiya login page ke liye //
 
 const STORAGE_KEY = "annvi_items_v1";
 
@@ -98,6 +99,7 @@ function format3(v) {
 }
 
 export default function ScanPage() {
+  useRequireLogin();                                  // kush nai add kiya login page ke liye //
   const [searchId, setSearchId] = useState("");
   const [message, setMessage] = useState("");
   const [item, setItem] = useState(null);
