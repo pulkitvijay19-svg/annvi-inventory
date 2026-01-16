@@ -1,6 +1,6 @@
 "use client";
 
-import { useEffect, useMemo, useState } from "react";
+import { useEffect, useState } from "react";
 import { supabase } from "@/lib/supabaseClient";
 import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
 import { useRouter } from "next/navigation";
@@ -37,6 +37,7 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
             return;
           }
 
+          // agar size abhi bhi bahut bada hai to thoda aur compress
           if (blob.size > 150 * 1024 && quality > 0.4) {
             compressImage(file, maxWidth, quality - 0.1)
               .then(resolve)
@@ -76,7 +77,7 @@ function rowToOrder(row) {
     karat: row.karat,
     productType: row.product_type,
     designNo: row.design_no,
-    weightRequired: String(row.weight_required ?? ""),
+    weightRequired: row.weight_required === null ? "" : String(row.weight_required),
     status: row.status || "RECEIVED",
     photoUrls: row.photo_urls || [],
     createdAt: row.created_at,
@@ -149,6 +150,7 @@ export default function OrdersPage() {
 
   function onPhotosChange(e) {
     const files = e.target.files ? Array.from(e.target.files) : [];
+    // purane previews free karo
     setPhotoPreviews((old) => {
       old.forEach((u) => URL.revokeObjectURL(u));
       return [];
@@ -172,7 +174,7 @@ export default function OrdersPage() {
     setMsg("Saving order...");
 
     try {
-      // 1) upload photos (if any)
+      // 1) photos upload karo (agar hai to)
       const photoUrls = [];
 
       for (let i = 0; i < photoFiles.length; i++) {
@@ -197,6 +199,7 @@ export default function OrdersPage() {
           const { data } = supabase.storage
             .from(ORDER_IMAGES_BUCKET)
             .getPublicUrl(path);
+
           if (data?.publicUrl) {
             photoUrls.push(data.publicUrl);
           }
@@ -205,7 +208,7 @@ export default function OrdersPage() {
         }
       }
 
-      // 2) insert order row
+      // 2) order row insert karo
       const { data, error } = await supabase
         .from("orders")
         .insert({
@@ -229,7 +232,7 @@ export default function OrdersPage() {
       const newOrder = rowToOrder(data);
       setOrders((prev) => [newOrder, ...prev]);
 
-      // clear form
+      // form clear
       setForm((prev) => ({
         ...prev,
         partyName: "",
@@ -288,8 +291,6 @@ export default function OrdersPage() {
     }
   }
 
-  const totalOrders = useMemo(() => orders.length, [orders]);
-
   // ---------- UI ----------
 
   return (
@@ -307,8 +308,7 @@ export default function OrdersPage() {
               </p>
               {msg ? (
                 <div className="mt-2 text-xs text-white/70">
-                  {saving || loading ? "⏳ " : "✅ "}
-                  {msg}
+                  {(saving || loading) ? "⏳ " : ""}{msg}
                 </div>
               ) : null}
             </div>
@@ -322,7 +322,7 @@ export default function OrdersPage() {
                 Logout
               </button>
               <div className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70">
-                Total: {totalOrders}
+                Total: {orders.length}
               </div>
             </div>
           </div>
@@ -411,9 +411,7 @@ export default function OrdersPage() {
             </div>
 
             <div>
-              <label className="text-sm text-white/70">
-                Order Status
-              </label>
+              <label className="text-sm text-white/70">Order Status</label>
               <select
                 value={form.status}
                 onChange={(e) => updateForm("status", e.target.value)}
@@ -487,9 +485,7 @@ export default function OrdersPage() {
                 >
                   <div className="flex justify-between gap-3">
                     <div className="flex-1">
-                      <div className="text-sm text-white/60">
-                        Party
-                      </div>
+                      <div className="text-sm text-white/60">Party</div>
                       <div className="text-lg font-semibold">
                         {o.partyName}
                       </div>
@@ -525,7 +521,6 @@ export default function OrdersPage() {
                       </div>
                     </div>
 
-                    {/* Photos */}
                     {o.photoUrls && o.photoUrls.length > 0 ? (
                       <div className="flex w-24 flex-col gap-2">
                         <div className="flex flex-wrap gap-1">
