@@ -684,7 +684,7 @@ export default function AddPage() {
               <label className="text-sm text-white/70">Photo (optional)</label>
               <input
                 type="file"
-                accept="image/*"
+                accept="image/*;capture=camera"
                 onChange={onPhotoChange}
                 className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
               />
