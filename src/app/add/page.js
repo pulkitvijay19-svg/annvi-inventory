@@ -38,7 +38,6 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
             return;
           }
 
-          // agar size abhi bhi bahut bada hai to thoda aur compress
           if (blob.size > 150 * 1024 && quality > 0.4) {
             compressImage(file, maxWidth, quality - 0.1)
               .then(resolve)
@@ -240,9 +239,11 @@ export default function AddPage() {
     notes: "",
   });
 
-  // photo state
   const [photoFile, setPhotoFile] = useState(null);
   const [photoPreview, setPhotoPreview] = useState(null);
+
+  // image zoom modal
+  const [imageOpenUrl, setImageOpenUrl] = useState(null);
 
   // Initial load: local first, then cloud sync
   useEffect(() => {
@@ -363,7 +364,6 @@ export default function AddPage() {
         place: "Local",
       });
 
-      // photo upload
       if (photoFile) {
         setCloudMsg("Uploading photo...");
 
@@ -396,9 +396,7 @@ export default function AddPage() {
             .eq("item_id", itemId);
 
           setItems((prev) =>
-            prev.map((x) =>
-              x.itemId === itemId ? { ...x, imageUrl } : x
-            )
+            prev.map((x) => (x.itemId === itemId ? { ...x, imageUrl } : x))
           );
 
           setCloudMsg(`Saved + photo uploaded ✅ (${itemId})`);
@@ -683,13 +681,10 @@ export default function AddPage() {
             </div>
 
             <div>
-              <label className="text-sm text-white/70">
-                Photo (optional)
-              </label>
+              <label className="text-sm text-white/70">Photo (optional)</label>
               <input
                 type="file"
                 accept="image/*"
-                capture="environment"
                 onChange={onPhotoChange}
                 className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
               />
@@ -703,7 +698,8 @@ export default function AddPage() {
                     />
                   </div>
                   <div className="text-xs text-white/50">
-                    Camera se li gayi image compress hogi (approx ~100 KB).
+                    Camera / gallery se aayi image compress hogi (approx ~100
+                    KB).
                   </div>
                 </div>
               ) : null}
@@ -784,7 +780,11 @@ export default function AddPage() {
                     {/* RIGHT SIDE: image (if any) + QR + Print / Delete */}
                     <div className="flex flex-col items-end gap-2">
                       {x.imageUrl ? (
-                        <div className="h-14 w-14 overflow-hidden rounded-lg border border-white/20 bg-black/40">
+                        <div
+                          className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                          title="Tap to enlarge"
+                          onClick={() => setImageOpenUrl(x.imageUrl)}
+                        >
                           <img
                             src={x.imageUrl}
                             alt={x.itemId}
@@ -868,6 +868,38 @@ export default function AddPage() {
               <div className="mt-1 text-xs text-white/50">
                 Scan this to fetch item by ItemID
               </div>
+            </div>
+          </div>
+        </div>
+      ) : null}
+
+      {/* Image Modal */}
+      {imageOpenUrl ? (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
+          onClick={() => setImageOpenUrl(null)}
+        >
+          <div
+            className="w-full max-w-sm rounded-2xl border border-white/10 bg-black p-4"
+            onClick={(e) => e.stopPropagation()}
+          >
+            <div className="flex items-center justify-between">
+              <div className="text-sm text-white/70">Item Photo</div>
+              <button
+                className="rounded-lg border border-white/15 px-3 py-1 text-xs text-white/70 hover:border-white/30"
+                onClick={() => setImageOpenUrl(null)}
+                type="button"
+              >
+                Close
+              </button>
+            </div>
+
+            <div className="mt-3 flex items-center justify-center rounded-xl bg-black">
+              <img
+                src={imageOpenUrl}
+                alt="Item"
+                className="max-h-[70vh] w-auto object-contain"
+              />
             </div>
           </div>
         </div>
