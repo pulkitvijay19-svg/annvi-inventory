@@ -59,7 +59,7 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
   });
 }
 
-const ORDERS_BUCKET = "order-images";
+const ORDERS_BUCKET = "item-images";
 
 // Row → JS object
 function rowToOrder(r) {
