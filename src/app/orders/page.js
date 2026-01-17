@@ -5,17 +5,18 @@ import { supabase } from "@/lib/supabaseClient";
 import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
 import { useRouter } from "next/navigation";
 
-// ---------- IMAGE COMPRESS (~100 KB each) ----------
+// -------- IMAGE COMPRESSOR (same style as Add page) ----------
 async function compressImage(file, maxWidth = 900, quality = 0.7) {
   return new Promise((resolve, reject) => {
     const img = new Image();
 
     img.onload = () => {
       const canvas = document.createElement("canvas");
-      const ratio = img.width > maxWidth ? maxWidth / img.width : 1;
 
+      const ratio = img.width > maxWidth ? maxWidth / img.width : 1;
       const w = img.width * ratio;
       const h = img.height * ratio;
+
       canvas.width = w;
       canvas.height = h;
 
@@ -35,7 +36,6 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
           }
 
           if (blob.size > 150 * 1024 && quality > 0.4) {
-            // thoda aur compress
             compressImage(file, maxWidth, quality - 0.1)
               .then(resolve)
               .catch(reject);
@@ -59,23 +59,47 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
   });
 }
 
-// ---------- HELPERS ----------
-function todayYYYYMMDD() {
-  const d = new Date();
-  const yyyy = d.getFullYear();
-  const mm = String(d.getMonth() + 1).padStart(2, "0");
-  const dd = String(d.getDate()).padStart(2, "0");
-  return `${yyyy}-${mm}-${dd}`;
+const ORDERS_BUCKET = "order-images";
+
+// Row → JS object
+function rowToOrder(r) {
+  return {
+    id: r.id,
+    partyName: r.party_name || "",
+    orderDate: r.order_date || "",
+    deliveryDate: r.delivery_date || "",
+    karat: r.karat || "22K",
+    productType: r.product_type || "",
+    designText: r.design_text || "",
+    weightRequired: r.weight_required || "",
+    status: r.status || "RECEIVED",
+    photoUrls: Array.isArray(r.photo_urls) ? r.photo_urls : [],
+    createdAt: r.created_at || "",
+  };
+}
+
+// UI display only – nice looking ID
+function formatOrderId(order) {
+  if (!order?.id) return "";
+  const yy =
+    order.orderDate && !Number.isNaN(new Date(order.orderDate).getTime())
+      ? String(new Date(order.orderDate).getFullYear()).slice(-2)
+      : String(new Date().getFullYear()).slice(-2);
+
+  const short = order.id.slice(0, 4).toUpperCase();
+  return `ORD-${yy}-${short}`;
 }
 
 export default function OrdersPage() {
   useRequireLogin();
   const router = useRouter();
 
+  const today = new Date().toISOString().slice(0, 10);
+
   const [form, setForm] = useState({
     partyName: "",
-    orderDate: todayYYYYMMDD(),
-    deliveryDate: "",
+    orderDate: today,
+    deliveryDate: today,
     karat: "22K",
     productType: "",
     designText: "",
@@ -83,24 +107,13 @@ export default function OrdersPage() {
     status: "RECEIVED",
   });
 
-  const [files, setFiles] = useState([]);
-  const [previews, setPreviews] = useState([]);
-
+  const [photoFiles, setPhotoFiles] = useState([]);
   const [orders, setOrders] = useState([]);
+  const [saving, setSaving] = useState(false);
   const [msg, setMsg] = useState("");
-  const [busy, setBusy] = useState(false);
 
-  const [bigImage, setBigImage] = useState(null);
-
-  // -------- LOAD ORDERS ONCE ----------
-  useEffect(() => {
-    loadOrders();
-  }, []);
-
+  // ------- load latest orders --------
   async function loadOrders() {
-    setBusy(true);
-    setMsg("Loading orders from cloud...");
-
     const { data, error } = await supabase
       .from("orders")
       .select("*")
@@ -109,106 +122,73 @@ export default function OrdersPage() {
 
     if (error) {
       console.error(error);
-      setMsg("Failed to load orders ⚠ – Supabase error.");
-    } else {
-      setOrders(data || []);
-      setMsg("");
+      setMsg("Load failed ⚠ – Supabase error.");
+      return;
     }
 
-    setBusy(false);
+    setOrders((data || []).map(rowToOrder));
   }
 
-  // -------- FORM HANDLERS ----------
-  function updateField(key, value) {
+  useEffect(() => {
+    loadOrders();
+  }, []);
+
+  function updateForm(key, value) {
     setForm((p) => ({ ...p, [key]: value }));
   }
 
-  function onFilesChange(e) {
-    const list = Array.from(e.target.files || []);
-    setFiles(list);
-
-    // previews
-    const urls = list.map((f) => URL.createObjectURL(f));
-    // old revoke
-    setPreviews((old) => {
-      old.forEach((u) => URL.revokeObjectURL(u));
-      return urls;
-    });
+  function onPhotoChange(e) {
+    const files = Array.from(e.target.files || []);
+    setPhotoFiles(files);
   }
 
-  // -------- SUBMIT ORDER ----------
+  // ---------- SAVE NEW ORDER -----------
   async function onSubmit(e) {
     e.preventDefault();
-
-    if (!form.partyName.trim()) {
-      setMsg("Party name required.");
-      return;
-    }
-    if (!form.deliveryDate) {
-      setMsg("Delivery date required.");
-      return;
-    }
-    if (!form.productType.trim()) {
-      setMsg("Product type required.");
-      return;
-    }
-    if (!form.designText.trim()) {
-      setMsg("Design details required.");
-      return;
-    }
-    if (!form.weightRequired.trim()) {
-      setMsg("Weight required is mandatory.");
-      return;
-    }
-
-    setBusy(true);
+    setSaving(true);
     setMsg("Saving order...");
 
-    const now = new Date().toISOString();
-
-    // 1) Insert order WITHOUT images first
-    const { data, error } = await supabase
-      .from("orders")
-      .insert({
+    try {
+      const baseRow = {
         party_name: form.partyName.trim(),
-        order_date: form.orderDate, // string yyyy-mm-dd
+        order_date: form.orderDate,
         delivery_date: form.deliveryDate,
         karat: form.karat,
         product_type: form.productType.trim(),
         design_text: form.designText.trim(),
-        weight_required: Number(form.weightRequired) || 0,
+        weight_required: form.weightRequired.trim(),
         status: form.status,
-        image_urls: [], // fill after upload
-        created_at: now,
-        updated_at: now,
-      })
-      .select("*")
-      .single();
+      };
 
-    if (error || !data) {
-      console.error(error);
-      setMsg("Order save failed ⚠ – Supabase insert error (table / RLS check karo).");
-      setBusy(false);
-      return;
-    }
+      // 1) insert order row (without photos)
+      const { data, error } = await supabase
+        .from("orders")
+        .insert(baseRow)
+        .select("*")
+        .single();
 
-    let savedOrder = data;
-    const orderId = data.id;
+      if (error || !data) {
+        console.error(error);
+        setMsg("Order save failed ⚠ – Supabase insert error (table / RLS check karo).");
+        setSaving(false);
+        return;
+      }
 
-    // 2) Agar images hai to upload karo
-    let imageUrls = [];
+      let order = rowToOrder(data);
 
-    if (files.length > 0) {
-      setMsg("Uploading order photos...");
+      // 2) upload photos if any
+      if (photoFiles.length > 0) {
+        setMsg("Uploading photos...");
+        const urls = [];
 
-      for (let i = 0; i < files.length; i++) {
-        const file = files[i];
-        try {
+        let index = 0;
+        for (const file of photoFiles) {
           const compressed = await compressImage(file);
-          const path = `orders/${orderId}/photo-${i + 1}.jpg`;
+          const fileName = `${index}.jpg`;
+          const path = `orders/${order.id}/${fileName}`;
 
           const { error: upErr } = await supabase.storage
-            .from("item-images") // same bucket we already use
+            .from(ORDERS_BUCKET)
             .upload(path, compressed, {
               upsert: true,
               contentType: "image/jpeg",
@@ -216,134 +196,155 @@ export default function OrdersPage() {
 
           if (upErr) {
             console.error(upErr);
-            continue;
+          } else {
+            const { data: urlData } = supabase.storage
+              .from(ORDERS_BUCKET)
+              .getPublicUrl(path);
+            if (urlData?.publicUrl) {
+              urls.push(urlData.publicUrl);
+            }
           }
 
-          const { data: urlData } = supabase.storage
-            .from("item-images")
-            .getPublicUrl(path);
+          index++;
+        }
 
-          if (urlData && urlData.publicUrl) {
-            imageUrls.push(urlData.publicUrl);
+        if (urls.length > 0) {
+          const { data: updated, error: updErr } = await supabase
+            .from("orders")
+            .update({ photo_urls: urls })
+            .eq("id", order.id)
+            .select("*")
+            .single();
+
+          if (!updErr && updated) {
+            order = rowToOrder(updated);
+          } else if (updErr) {
+            console.error(updErr);
           }
-        } catch (err) {
-          console.error(err);
         }
       }
 
-      if (imageUrls.length > 0) {
-        const { data: updated, error: updErr } = await supabase
-          .from("orders")
-          .update({
-            image_urls: imageUrls,
-            updated_at: new Date().toISOString(),
-          })
-          .eq("id", orderId)
-          .select("*")
-          .single();
+      // update local list
+      setOrders((prev) => [order, ...prev]);
 
-        if (!updErr && updated) {
-          savedOrder = updated;
-        }
+      // reset form
+      setForm((p) => ({
+        ...p,
+        partyName: "",
+        productType: "",
+        designText: "",
+        weightRequired: "",
+      }));
+      setPhotoFiles([]);
+
+      // *** FIXED: plain JS reset for file input ***
+      const inputEl = document.getElementById("orderPhotosInput");
+      if (inputEl && typeof inputEl === "object" && "value" in inputEl) {
+        inputEl.value = "";
       }
+
+      setMsg("Order saved ✅");
+    } catch (err) {
+      console.error(err);
+      setMsg("Order save failed ⚠ – unexpected error.");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setMsg(""), 2500);
     }
-
-    // 3) Local state update
-    setOrders((prev) => [savedOrder, ...prev]);
-    setMsg("Order saved ✅");
-
-    // form reset
-    setForm({
-      partyName: "",
-      orderDate: todayYYYYMMDD(),
-      deliveryDate: "",
-      karat: form.karat, // last used
-      productType: "",
-      designText: "",
-      weightRequired: "",
-      status: "RECEIVED",
-    });
-    setFiles([]);
-    setPreviews((old) => {
-      old.forEach((u) => URL.revokeObjectURL(u));
-      return [];
-    });
-
-    setBusy(false);
   }
 
-  // -------- UPDATE STATUS FOR EXISTING ORDER ----------
+  // ---------- UPDATE STATUS FROM LIST ----------
   async function updateOrderStatus(orderId, newStatus) {
-    setBusy(true);
-    setMsg(`Updating status to ${newStatus}...`);
+    setSaving(true);
+    setMsg("Updating order status...");
 
-    const { data, error } = await supabase
-      .from("orders")
-      .update({ status: newStatus, updated_at: new Date().toISOString() })
-      .eq("id", orderId)
-      .select("*")
-      .single();
+    try {
+      const { data, error } = await supabase
+        .from("orders")
+        .update({ status: newStatus })
+        .eq("id", orderId)
+        .select("*")
+        .single();
 
-    if (error || !data) {
-      console.error(error);
-      setMsg("Status update failed ⚠ – Supabase / RLS check karo.");
-      setBusy(false);
-      return;
+      if (error || !data) {
+        console.error(error);
+        setMsg("Status update failed ⚠");
+      } else {
+        const updated = rowToOrder(data);
+        setOrders((prev) =>
+          prev.map((o) => (o.id === orderId ? updated : o))
+        );
+        setMsg("Status updated ✅");
+      }
+    } catch (err) {
+      console.error(err);
+      setMsg("Status update failed ⚠");
+    } finally {
+      setSaving(false);
+      setTimeout(() => setMsg(""), 2000);
     }
-
-    setOrders((prev) =>
-      prev.map((o) => (o.id === orderId ? data : o))
-    );
-    setMsg("Status updated ✅");
-    setBusy(false);
   }
+
+  // ---------- DELETE ORDER ----------
+  async function deleteOrder(rowId) {
+  if (!confirm("Delete this order?")) return;
+
+  // local state se hatao
+  setOrders((prev) => prev.filter((o) => o.id !== rowId));
+
+  try {
+    const { error } = await supabase
+      .from("orders")
+      .delete()
+      .eq("id", rowId);     // 👈 id se delete
+
+    if (error) throw error;
+    setMsg("Order deleted ✅");
+  } catch (err) {
+    console.error(err);
+    setMsg("Order delete failed ⚠ – check Supabase.");
+  }
+}
+
 
   return (
     <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-3xl px-4 py-8 space-y-6">
-        {/* HEADER + LOGOUT */}
-        <div className="flex items-start justify-between gap-3">
-          <div>
-            <div className="text-sm tracking-widest text-white/70">
-              ANNVI GOLD
-            </div>
-            <h1 className="mt-1 text-2xl font-semibold">Orders</h1>
-            <p className="mt-1 text-sm text-white/60">
-              Party wise orders with photos + live status.
-            </p>
-          </div>
-
-          <button
-            type="button"
-            onClick={() => doLogout(router)}
-            className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
-          >
-            Logout
-          </button>
-        </div>
-
-        {/* MESSAGE */}
-        {msg ? (
-          <div className="rounded-xl border border-white/15 bg-white/5 px-4 py-3 text-sm text-white/80">
-            {msg}
-          </div>
-        ) : null}
-
-        {/* ORDER FORM */}
+      <div className="mx-auto max-w-2xl px-4 py-8">
         <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">New Order</h2>
-          <p className="mt-1 text-xs text-white/60">
-            Fill details + upload reference photos (optional).
-          </p>
+          <div className="mb-4 flex items-start justify-between gap-3">
+            <div>
+              <div className="text-sm tracking-widest text-white/70">
+                ANNVI GOLD
+              </div>
+              <h1 className="mt-1 text-2xl font-semibold">Orders</h1>
+              <p className="mt-1 text-sm text-white/60">
+                Party wise orders with photos + live status.
+              </p>
+              {msg ? (
+                <div className="mt-2 text-xs text-white/70">
+                  {saving ? "⏳ " : "✅ "} {msg}
+                </div>
+              ) : null}
+            </div>
 
-          <form onSubmit={onSubmit} className="mt-4 space-y-4">
+            <button
+              type="button"
+              onClick={() => doLogout(router)}
+              className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
+            >
+              Logout
+            </button>
+          </div>
+
+          {/* NEW ORDER FORM */}
+          <form onSubmit={onSubmit} className="space-y-4">
             <div>
               <label className="text-sm text-white/70">Party Name</label>
               <input
                 value={form.partyName}
-                onChange={(e) => updateField("partyName", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-                placeholder="e.g. M.M. Jewellers"
+                onChange={(e) => updateForm("partyName", e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                required
               />
             </div>
 
@@ -353,8 +354,9 @@ export default function OrdersPage() {
                 <input
                   type="date"
                   value={form.orderDate}
-                  onChange={(e) => updateField("orderDate", e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  onChange={(e) => updateForm("orderDate", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                  required
                 />
               </div>
               <div>
@@ -362,10 +364,9 @@ export default function OrdersPage() {
                 <input
                   type="date"
                   value={form.deliveryDate}
-                  onChange={(e) =>
-                    updateField("deliveryDate", e.target.value)
-                  }
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  onChange={(e) => updateForm("deliveryDate", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                  required
                 />
               </div>
             </div>
@@ -375,29 +376,29 @@ export default function OrdersPage() {
                 <label className="text-sm text-white/70">Karat</label>
                 <select
                   value={form.karat}
-                  onChange={(e) => updateField("karat", e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  onChange={(e) => updateForm("karat", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                 >
                   <option>22K</option>
                   <option>20K</option>
                   <option>18K</option>
                   <option>14K</option>
                   <option>9K</option>
-                  <option>Mixed</option>
                 </select>
               </div>
 
               <div>
                 <label className="text-sm text-white/70">
-                  Weight Required (g)
+                  Weight Required (text allowed)
                 </label>
                 <input
+                  type="text"
                   value={form.weightRequired}
                   onChange={(e) =>
-                    updateField("weightRequired", e.target.value)
+                    updateForm("weightRequired", e.target.value)
                   }
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-                  placeholder="e.g. 120"
+                  placeholder="e.g. 2.50 / 2.5–3g / 2.5+pendant"
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                 />
               </div>
             </div>
@@ -406,22 +407,22 @@ export default function OrdersPage() {
               <label className="text-sm text-white/70">Product Type</label>
               <input
                 value={form.productType}
-                onChange={(e) => updateField("productType", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-                placeholder="e.g. Kada, Choker, Pendant Set"
+                onChange={(e) => updateForm("productType", e.target.value)}
+                placeholder="ring / bali / kada, etc."
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
               />
             </div>
 
             <div>
               <label className="text-sm text-white/70">
-                Design No. / Details
+                Design No / Notes (text + special)
               </label>
               <textarea
                 value={form.designText}
-                onChange={(e) => updateField("designText", e.target.value)}
+                onChange={(e) => updateForm("designText", e.target.value)}
+                rows={2}
+                placeholder="e.g. D1234, D1235 (top), D1236 (side)..."
                 className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-                rows={3}
-                placeholder="Free text – multiple design nos, notes, special instructions..."
               />
             </div>
 
@@ -430,163 +431,120 @@ export default function OrdersPage() {
                 <label className="text-sm text-white/70">Order Status</label>
                 <select
                   value={form.status}
-                  onChange={(e) => updateField("status", e.target.value)}
-                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  onChange={(e) => updateForm("status", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                 >
                   <option value="RECEIVED">Received</option>
                   <option value="IN_PROCESS">In Process</option>
                   <option value="DELIVERED">Delivered</option>
                 </select>
               </div>
-
               <div>
                 <label className="text-sm text-white/70">
                   Photos (optional, multiple)
                 </label>
                 <input
+                  id="orderPhotosInput"
                   type="file"
                   accept="image/*"
                   multiple
-                  onChange={onFilesChange}
+                  onChange={onPhotoChange}
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
                 />
-                {previews.length > 0 ? (
-                  <div className="mt-2 flex flex-wrap gap-2">
-                    {previews.map((src, i) => (
-                      <div
-                        key={i}
-                        className="h-12 w-12 overflow-hidden rounded-lg border border-white/15 bg-black/40"
-                      >
-                        <img
-                          src={src}
-                          alt={`preview-${i}`}
-                          className="h-full w-full object-cover"
-                        />
-                      </div>
-                    ))}
-                  </div>
-                ) : null}
               </div>
             </div>
 
             <button
               type="submit"
-              disabled={busy}
-              className="w-full rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90 disabled:opacity-60"
+              disabled={saving}
+              className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90 disabled:opacity-60"
             >
               Save Order
             </button>
           </form>
         </div>
 
-        {/* ORDER LIST */}
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
-          <h2 className="text-lg font-semibold">Orders List</h2>
-          <p className="mt-1 text-xs text-white/60">
-            Latest orders (max 200). Change status and save.
-          </p>
+        {/* ORDERS LIST */}
+        <div className="mt-6 rounded-2xl border border-white/10 bg-white/5 p-4">
+          <div className="mb-2 text-sm text-white/60">
+            Orders List (max 200). Change status, delete, view photos.
+          </div>
 
-          <div className="mt-4 space-y-3">
-            {orders.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
-                No orders yet.
-              </div>
-            ) : (
-              orders.map((o) => (
+          {orders.length === 0 ? (
+            <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
+              No orders yet.
+            </div>
+          ) : (
+            <div className="space-y-3">
+              {orders.map((o) => (
                 <div
                   key={o.id}
-                  className="rounded-xl border border-white/10 bg-black/30 p-3"
+                  className="flex items-start justify-between gap-3 rounded-xl border border-white/10 bg-black/30 p-3"
                 >
-                  <div className="flex gap-3">
-                    <div className="flex-1 space-y-1 text-sm">
-                      <div className="text-xs text-white/50">
-                        Party / Order ID
-                      </div>
-                      <div className="font-semibold">
-                        {o.party_name || "-"}{" "}
-                        <span className="text-xs text-white/40">
-                          ({o.id.slice(0, 8)}…)
-                        </span>
-                      </div>
-                      <div className="text-xs text-white/60">
-                        Order: {o.order_date || "-"} • Delivery:{" "}
-                        {o.delivery_date || "-"}
-                      </div>
-                      <div className="text-xs text-white/60">
-                        {o.karat} • {o.product_type} • wt:{" "}
-                        {o.weight_required ?? 0} g
-                      </div>
-                      <div className="text-xs text-white/60">
-                        {o.design_text}
-                      </div>
-
-                      <div className="mt-2 flex items-center gap-2">
-                        <span className="text-xs text-white/60">
-                          Status:
-                        </span>
-                        <select
-                          value={o.status || "RECEIVED"}
-                          onChange={(e) =>
-                            updateOrderStatus(o.id, e.target.value)
-                          }
-                          className="rounded-lg border border-white/15 bg-black/40 px-2 py-1 text-xs outline-none focus:border-white/30"
-                          disabled={busy}
-                        >
-                          <option value="RECEIVED">Received</option>
-                          <option value="IN_PROCESS">In Process</option>
-                          <option value="DELIVERED">Delivered</option>
-                        </select>
-                      </div>
+                  {/* LEFT: text */}
+                  <div className="flex-1">
+                    <div className="text-sm font-semibold">
+                      {o.partyName || "(No party)"}{" "}
+                      <span className="text-xs text-white/50">
+                        ({formatOrderId(o)})
+                      </span>
                     </div>
+                    <div className="mt-1 text-xs text-white/60">
+                      Order: {o.orderDate || "—"} • Delivery:{" "}
+                      {o.deliveryDate || "—"}
+                    </div>
+                    <div className="mt-1 text-xs text-white/60">
+                      {o.karat} • Wt: {o.weightRequired || "—"}
+                    </div>
+                    {o.designText ? (
+                      <div className="mt-1 text-xs text-white/50">
+                        {o.designText}
+                      </div>
+                    ) : null}
 
-                    {/* images small thumbnails */}
-                    {Array.isArray(o.image_urls) && o.image_urls.length > 0 ? (
-                      <div className="flex flex-col items-end gap-2">
-                        <div className="flex flex-wrap justify-end gap-2">
-                          {o.image_urls.slice(0, 3).map((url, i) => (
-                            <button
-                              key={i}
-                              type="button"
-                              onClick={() => setBigImage(url)}
-                              className="h-12 w-12 overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                            >
-                              <img
-                                src={url}
-                                alt={`img-${i}`}
-                                className="h-full w-full object-cover"
-                              />
-                            </button>
-                          ))}
-                        </div>
-                        {o.image_urls.length > 3 ? (
-                          <div className="text-[10px] text-white/50">
-                            +{o.image_urls.length - 3} more
-                          </div>
-                        ) : null}
+                    <div className="mt-2 flex flex-wrap items-center gap-2 text-xs">
+                      <span className="text-white/60">Status:</span>
+                      <select
+                        value={o.status}
+                        onChange={(e) =>
+                          updateOrderStatus(o.id, e.target.value)
+                        }
+                        className="rounded-lg border border-white/15 bg-black/40 px-3 py-1 text-xs text-white/80 outline-none focus:border-white/30"
+                        disabled={saving}
+                      >
+                        <option value="RECEIVED">Received</option>
+                        <option value="IN_PROCESS">In Process</option>
+                        <option value="DELIVERED">Delivered</option>
+                      </select>
+
+                      <button
+                        type="button"
+                        onClick={() => deleteOrder(o.id)}
+                        className="ml-auto rounded-lg border border-red-500/60 bg-transparent px-3 py-1 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                      >
+                        Delete Order
+                      </button>
+                    </div>
+                  </div>
+
+                  {/* RIGHT: first photo preview */}
+                  <div className="flex flex-col items-end gap-2">
+                    {o.photoUrls && o.photoUrls.length > 0 ? (
+                      <div className="h-16 w-16 overflow-hidden rounded-lg border border-white/20 bg-black/40">
+                        <img
+                          src={o.photoUrls[0]}
+                          alt="Order"
+                          className="h-full w-full object-cover"
+                        />
                       </div>
                     ) : null}
                   </div>
                 </div>
-              ))
-            )}
-          </div>
+              ))}
+            </div>
+          )}
         </div>
       </div>
-
-      {/* BIG IMAGE MODAL */}
-      {bigImage ? (
-        <div
-          className="fixed inset-0 z-50 flex items-center justify-center bg-black/80 p-4"
-          onClick={() => setBigImage(null)}
-        >
-          <div
-            className="max-h-full max-w-full overflow-hidden rounded-2xl border border-white/15 bg-black"
-            onClick={(e) => e.stopPropagation()}
-          >
-            <img src={bigImage} alt="order" className="h-full w-full object-contain" />
-          </div>
-        </div>
-      ) : null}
     </main>
   );
 }
