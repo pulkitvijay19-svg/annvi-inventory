@@ -63,6 +63,13 @@ const ORDERS_BUCKET = "order-images";
 
 // Row → JS object
 function rowToOrder(r) {
+  // image_urls is new column; photo_urls fallback in case purana data ho
+  const imagesRaw = Array.isArray(r.image_urls)
+    ? r.image_urls
+    : Array.isArray(r.photo_urls)
+    ? r.photo_urls
+    : [];
+
   return {
     id: r.id,
     partyName: r.party_name || "",
@@ -73,7 +80,7 @@ function rowToOrder(r) {
     designText: r.design_text || "",
     weightRequired: r.weight_required || "",
     status: r.status || "RECEIVED",
-    photoUrls: Array.isArray(r.photo_urls) ? r.photo_urls : [],
+    photoUrls: imagesRaw,
     createdAt: r.created_at || "",
   };
 }
@@ -86,7 +93,7 @@ function formatOrderId(order) {
       ? String(new Date(order.orderDate).getFullYear()).slice(-2)
       : String(new Date().getFullYear()).slice(-2);
 
-  const short = order.id.slice(0, 4).toUpperCase();
+  const short = String(order.id).slice(0, 4).toUpperCase();
   return `ORD-${yy}-${short}`;
 }
 
@@ -158,6 +165,8 @@ export default function OrdersPage() {
         design_text: form.designText.trim(),
         weight_required: form.weightRequired.trim(),
         status: form.status,
+        // jsonb column ke liye safe default – kabhi null nahi jayega
+        image_urls: [],
       };
 
       // 1) insert order row (without photos)
@@ -169,7 +178,9 @@ export default function OrdersPage() {
 
       if (error || !data) {
         console.error(error);
-        setMsg("Order save failed ⚠ – Supabase insert error (table / RLS check karo).");
+        setMsg(
+          "Order save failed ⚠ – Supabase insert error (table / RLS check karo)."
+        );
         setSaving(false);
         return;
       }
@@ -211,7 +222,7 @@ export default function OrdersPage() {
         if (urls.length > 0) {
           const { data: updated, error: updErr } = await supabase
             .from("orders")
-            .update({ photo_urls: urls })
+            .update({ image_urls: urls })
             .eq("id", order.id)
             .select("*")
             .single();
@@ -237,7 +248,7 @@ export default function OrdersPage() {
       }));
       setPhotoFiles([]);
 
-      // *** FIXED: plain JS reset for file input ***
+      // file input clear
       const inputEl = document.getElementById("orderPhotosInput");
       if (inputEl && typeof inputEl === "object" && "value" in inputEl) {
         inputEl.value = "";
@@ -287,25 +298,24 @@ export default function OrdersPage() {
 
   // ---------- DELETE ORDER ----------
   async function deleteOrder(rowId) {
-  if (!confirm("Delete this order?")) return;
+    if (!confirm("Delete this order?")) return;
 
-  // local state se hatao
-  setOrders((prev) => prev.filter((o) => o.id !== rowId));
+    // local state se hatao
+    setOrders((prev) => prev.filter((o) => o.id !== rowId));
 
-  try {
-    const { error } = await supabase
-      .from("orders")
-      .delete()
-      .eq("id", rowId);     // 👈 id se delete
+    try {
+      const { error } = await supabase
+        .from("orders")
+        .delete()
+        .eq("id", rowId);
 
-    if (error) throw error;
-    setMsg("Order deleted ✅");
-  } catch (err) {
-    console.error(err);
-    setMsg("Order delete failed ⚠ – check Supabase.");
+      if (error) throw error;
+      setMsg("Order deleted ✅");
+    } catch (err) {
+      console.error(err);
+      setMsg("Order delete failed ⚠ – check Supabase.");
+    }
   }
-}
-
 
   return (
     <main className="min-h-screen bg-black text-white">
