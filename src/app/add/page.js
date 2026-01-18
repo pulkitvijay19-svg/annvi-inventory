@@ -86,11 +86,27 @@ function saveItems(items) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
 }
 
+// ✅ UPDATED: ID kabhi reuse nahi hoga – year-wise max sequence + 1
 function nextItemId(items) {
   const yy = getYear2();
-  const yearItems = items.filter((x) => x.itemId?.startsWith(`AG-${yy}-`));
-  const next = yearItems.length + 1;
-  return `AG-${yy}-${pad6(next)}`;
+  const prefix = `AG-${yy}-`;
+
+  let maxSeq = 0;
+
+  for (const it of items) {
+    if (!it.itemId?.startsWith(prefix)) continue;
+
+    const parts = it.itemId.split("-");
+    const seqStr = parts[2] || "0";
+    const seq = parseInt(seqStr, 10);
+
+    if (!Number.isNaN(seq) && seq > maxSeq) {
+      maxSeq = seq;
+    }
+  }
+
+  const next = maxSeq + 1;
+  return `${prefix}${pad6(next)}`;
 }
 
 // ---------- CLOUD HELPERS (Supabase) ----------
@@ -191,6 +207,15 @@ async function cloudDeleteItem(itemId) {
     .delete()
     .eq("item_id", itemId);
   if (error) throw error;
+
+  // ✅ Storage se bhi image delete karo (agar ho)
+  try {
+    await supabase.storage
+      .from("item-images")
+      .remove([`items/${itemId}.jpg`]);
+  } catch (e) {
+    console.log("Storage delete failed (ignored)", e);
+  }
 }
 
 // delete ALL items from cloud (testing / reset)
@@ -732,7 +757,7 @@ export default function AddPage() {
                 No items yet.
               </div>
             ) : (
-              filtered.map((x) => (
+              filtered.slice(0, 30).map((x) => (
                 <div
                   key={x.itemId}
                   className="rounded-xl border border-white/10 bg-black/30 p-3"
