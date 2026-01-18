@@ -86,27 +86,11 @@ function saveItems(items) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
 }
 
-// ✅ UPDATED: ID kabhi reuse nahi hoga – year-wise max sequence + 1
 function nextItemId(items) {
   const yy = getYear2();
-  const prefix = `AG-${yy}-`;
-
-  let maxSeq = 0;
-
-  for (const it of items) {
-    if (!it.itemId?.startsWith(prefix)) continue;
-
-    const parts = it.itemId.split("-");
-    const seqStr = parts[2] || "0";
-    const seq = parseInt(seqStr, 10);
-
-    if (!Number.isNaN(seq) && seq > maxSeq) {
-      maxSeq = seq;
-    }
-  }
-
-  const next = maxSeq + 1;
-  return `${prefix}${pad6(next)}`;
+  const yearItems = items.filter((x) => x.itemId?.startsWith(`AG-${yy}-`));
+  const next = yearItems.length + 1;
+  return `AG-${yy}-${pad6(next)}`;
 }
 
 // ---------- CLOUD HELPERS (Supabase) ----------
@@ -207,15 +191,6 @@ async function cloudDeleteItem(itemId) {
     .delete()
     .eq("item_id", itemId);
   if (error) throw error;
-
-  // ✅ Storage se bhi image delete karo (agar ho)
-  try {
-    await supabase.storage
-      .from("item-images")
-      .remove([`items/${itemId}.jpg`]);
-  } catch (e) {
-    console.log("Storage delete failed (ignored)", e);
-  }
 }
 
 // delete ALL items from cloud (testing / reset)
@@ -389,16 +364,21 @@ export default function AddPage() {
         place: "Local",
       });
 
+      // ---------- UNIQUE PHOTO UPLOAD (FIX) ----------
       if (photoFile) {
         setCloudMsg("Uploading photo...");
 
         const compressed = await compressImage(photoFile);
-        const path = `items/${itemId}.jpg`;
+
+        // unique filename so purani image kabhi reuse na ho
+        const ts = Date.now();
+        const rand = Math.random().toString(36).slice(2, 8);
+        const path = `items/${itemId}_${ts}_${rand}.jpg`;
 
         const { error: uploadError } = await supabase.storage
           .from("item-images")
           .upload(path, compressed, {
-            upsert: true,
+            upsert: false, // unique name, overwrite ki zarurat nahi
             contentType: "image/jpeg",
           });
 
@@ -410,7 +390,9 @@ export default function AddPage() {
             .from("item-images")
             .getPublicUrl(path);
 
-          const imageUrl = (data && data.publicUrl) || "";
+          // cache bust query param, just in case
+          const baseUrl = (data && data.publicUrl) || "";
+          const imageUrl = baseUrl ? `${baseUrl}?v=${ts}` : "";
 
           await supabase
             .from("items")
@@ -760,7 +742,7 @@ export default function AddPage() {
               filtered.slice(0, 30).map((x) => (
                 <div
                   key={x.itemId}
-                  className="rounded-xl border border-white/10 bg-black/30 p-3"
+                  className="rounded-2xl border border-white/10 bg-black/30 p-3"
                 >
                   <div className="flex items-start justify-between gap-3">
                     {/* LEFT SIDE: details + status buttons */}
