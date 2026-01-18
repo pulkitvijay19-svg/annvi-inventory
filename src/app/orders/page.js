@@ -106,7 +106,8 @@ function buildWhatsAppUrl(order) {
   const lines = [
     `Namaste ${order.partyName || ""},`,
     ``,
-    `Annvi Gold se aapka order receive ho gaya hai ✅`,
+    `We have received your order.
+     Order Details:`,
     ``,
     `Order ID: ${formatOrderId(order)}`,
     `Party: ${order.partyName || "-"}`,
