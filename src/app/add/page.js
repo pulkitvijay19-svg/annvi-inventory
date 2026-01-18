@@ -732,7 +732,7 @@ export default function AddPage() {
                 No items yet.
               </div>
             ) : (
-              filtered.slice(0, 30).map((x) => (
+              filtered.map((x) => (
                 <div
                   key={x.itemId}
                   className="rounded-xl border border-white/10 bg-black/30 p-3"
