@@ -59,20 +59,14 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
   });
 }
 
-const ORDERS_BUCKET = "item-images";
+const ORDERS_BUCKET = "order-images";
 
 // Row → JS object
 function rowToOrder(r) {
-  // image_urls is new column; photo_urls fallback in case purana data ho
-  const imagesRaw = Array.isArray(r.image_urls)
-    ? r.image_urls
-    : Array.isArray(r.photo_urls)
-    ? r.photo_urls
-    : [];
-
   return {
     id: r.id,
     partyName: r.party_name || "",
+    partyMobile: r.party_mobile || "",
     orderDate: r.order_date || "",
     deliveryDate: r.delivery_date || "",
     karat: r.karat || "22K",
@@ -80,7 +74,7 @@ function rowToOrder(r) {
     designText: r.design_text || "",
     weightRequired: r.weight_required || "",
     status: r.status || "RECEIVED",
-    photoUrls: imagesRaw,
+    photoUrls: Array.isArray(r.photo_urls) ? r.photo_urls : [],
     createdAt: r.created_at || "",
   };
 }
@@ -93,8 +87,53 @@ function formatOrderId(order) {
       ? String(new Date(order.orderDate).getFullYear()).slice(-2)
       : String(new Date().getFullYear()).slice(-2);
 
-  const short = String(order.id).slice(0, 4).toUpperCase();
+  const short = order.id.slice(0, 4).toUpperCase();
   return `ORD-${yy}-${short}`;
+}
+
+// --------- WhatsApp helper ----------
+
+function buildWhatsAppUrl(order) {
+  if (!order?.partyMobile) return null;
+
+  // sirf digits rakho
+  const digits = String(order.partyMobile).replace(/\D/g, "");
+  if (!digits) return null;
+
+  // assume India: 10 digit ho to aage 91 laga do
+  const phone = digits.length === 10 ? "91" + digits : digits;
+
+  const lines = [
+    `Namaste ${order.partyName || ""},`,
+    ``,
+    `Annvi Gold se aapka order receive ho gaya hai ✅`,
+    ``,
+    `Order ID: ${formatOrderId(order)}`,
+    `Party: ${order.partyName || "-"}`,
+    `Mobile: ${order.partyMobile || "-"}`,
+    `Order Date: ${order.orderDate || "-"}`,
+    `Delivery Date: ${order.deliveryDate || "-"}`,
+    `Karat: ${order.karat || "-"}`,
+    `Product: ${order.productType || "-"}`,
+    `Weight Required: ${order.weightRequired || "-"}`,
+    `Status: ${order.status || "-"}`,
+    ``,
+    `Design / Notes: ${order.designText || "-"}`,
+    ``,
+    `Dhanyavaad,`,
+    `Annvi Gold`,
+  ];
+
+  const text = lines.join("\n");
+  const url = `https://wa.me/${phone}?text=${encodeURIComponent(text)}`;
+  return url;
+}
+
+function openWhatsAppForOrder(order) {
+  if (typeof window === "undefined") return;
+  const url = buildWhatsAppUrl(order);
+  if (!url) return;
+  window.open(url, "_blank");
 }
 
 export default function OrdersPage() {
@@ -105,6 +144,7 @@ export default function OrdersPage() {
 
   const [form, setForm] = useState({
     partyName: "",
+    partyMobile: "",
     orderDate: today,
     deliveryDate: today,
     karat: "22K",
@@ -158,6 +198,7 @@ export default function OrdersPage() {
     try {
       const baseRow = {
         party_name: form.partyName.trim(),
+        party_mobile: form.partyMobile.trim(),
         order_date: form.orderDate,
         delivery_date: form.deliveryDate,
         karat: form.karat,
@@ -165,8 +206,6 @@ export default function OrdersPage() {
         design_text: form.designText.trim(),
         weight_required: form.weightRequired.trim(),
         status: form.status,
-        // jsonb column ke liye safe default – kabhi null nahi jayega
-        image_urls: [],
       };
 
       // 1) insert order row (without photos)
@@ -222,7 +261,7 @@ export default function OrdersPage() {
         if (urls.length > 0) {
           const { data: updated, error: updErr } = await supabase
             .from("orders")
-            .update({ image_urls: urls })
+            .update({ photo_urls: urls })
             .eq("id", order.id)
             .select("*")
             .single();
@@ -242,19 +281,24 @@ export default function OrdersPage() {
       setForm((p) => ({
         ...p,
         partyName: "",
+        partyMobile: "",
         productType: "",
         designText: "",
         weightRequired: "",
       }));
       setPhotoFiles([]);
 
-      // file input clear
       const inputEl = document.getElementById("orderPhotosInput");
       if (inputEl && typeof inputEl === "object" && "value" in inputEl) {
         inputEl.value = "";
       }
 
       setMsg("Order saved ✅");
+
+      // 🔔 WhatsApp message (agar mobile diya hai to)
+      if (order.partyMobile) {
+        openWhatsAppForOrder(order);
+      }
     } catch (err) {
       console.error(err);
       setMsg("Order save failed ⚠ – unexpected error.");
@@ -300,14 +344,10 @@ export default function OrdersPage() {
   async function deleteOrder(rowId) {
     if (!confirm("Delete this order?")) return;
 
-    // local state se hatao
     setOrders((prev) => prev.filter((o) => o.id !== rowId));
 
     try {
-      const { error } = await supabase
-        .from("orders")
-        .delete()
-        .eq("id", rowId);
+      const { error } = await supabase.from("orders").delete().eq("id", rowId);
 
       if (error) throw error;
       setMsg("Order deleted ✅");
@@ -348,14 +388,28 @@ export default function OrdersPage() {
 
           {/* NEW ORDER FORM */}
           <form onSubmit={onSubmit} className="space-y-4">
-            <div>
-              <label className="text-sm text-white/70">Party Name</label>
-              <input
-                value={form.partyName}
-                onChange={(e) => updateForm("partyName", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-                required
-              />
+            <div className="grid grid-cols-2 gap-3">
+              <div>
+                <label className="text-sm text-white/70">Party Name</label>
+                <input
+                  value={form.partyName}
+                  onChange={(e) => updateForm("partyName", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                  required
+                />
+              </div>
+              <div>
+                <label className="text-sm text-white/70">
+                  Party Mobile (WhatsApp)
+                </label>
+                <input
+                  type="tel"
+                  value={form.partyMobile}
+                  onChange={(e) => updateForm("partyMobile", e.target.value)}
+                  placeholder="e.g. 9876543210"
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                />
+              </div>
             </div>
 
             <div className="grid grid-cols-2 gap-3">
@@ -499,6 +553,11 @@ export default function OrdersPage() {
                         ({formatOrderId(o)})
                       </span>
                     </div>
+                    {o.partyMobile ? (
+                      <div className="mt-0.5 text-xs text-white/55">
+                        Mob: {o.partyMobile}
+                      </div>
+                    ) : null}
                     <div className="mt-1 text-xs text-white/60">
                       Order: {o.orderDate || "—"} • Delivery:{" "}
                       {o.deliveryDate || "—"}
