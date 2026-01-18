@@ -107,7 +107,7 @@ function buildWhatsAppUrl(order) {
     `Namaste ${order.partyName || ""},`,
     ``,
     `We have received your order.
-     Order Details:`,
+    Order Details:`,
     ``,
     `Order ID: ${formatOrderId(order)}`,
     `Party: ${order.partyName || "-"}`,
