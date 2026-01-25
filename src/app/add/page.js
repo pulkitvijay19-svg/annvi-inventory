@@ -7,6 +7,26 @@ import { useRequireLogin, doLogout } from "@/lib/useRequireLogin";
 import { useRouter } from "next/navigation";
 
 const STORAGE_KEY = "annvi_items_v1";
+const ITEMS_BUCKET = "item-images";
+const PAGE_SIZE = 30;
+
+// ✅ Category list (as provided)
+const CATEGORIES = [
+  "Ladies Rings",
+  "Gents Rings",
+  "Earrings",
+  "Baby tops",
+  "Pendant",
+  "Pendant set",
+  "Har set",
+  "Bali",
+  "Bangles",
+  "Bracelet",
+  "Kada",
+  "Mangalsutra",
+  "Nosepin",
+  "Others",
+];
 
 // ------- IMAGE COMPRESS HELPER (~100 KB target) -------
 async function compressImage(file, maxWidth = 900, quality = 0.7) {
@@ -63,7 +83,6 @@ async function compressImage(file, maxWidth = 900, quality = 0.7) {
 }
 
 // --------------- ID HELPERS ----------------
-
 function pad6(n) {
   return String(n).padStart(6, "0");
 }
@@ -94,18 +113,30 @@ function nextItemId(items) {
 }
 
 // ---------- CLOUD HELPERS (Supabase) ----------
+function normalizeImageUrls(r) {
+  // Prefer image_urls (jsonb array), else fallback to image_url single.
+  const arr = Array.isArray(r.image_urls) ? r.image_urls : [];
+  if (arr.length > 0) return arr.filter(Boolean);
+  if (r.image_url) return [r.image_url];
+  return [];
+}
 
 function toCloudRow(localItem) {
+  const imageUrls = Array.isArray(localItem.imageUrls) ? localItem.imageUrls : [];
   return {
     item_id: localItem.itemId,
     design_no: localItem.designNo,
+    category: localItem.category || null,
     karat: localItem.karat,
     gross_wt: Number(localItem.grossWt || 0),
     less_wt: Number(localItem.lessWt || 0),
     net_wt: Number(localItem.netWt || 0),
     notes: localItem.notes || "",
     status: localItem.status,
-    image_url: localItem.imageUrl || null,
+    // backward compatibility:
+    image_url: imageUrls[0] || null,
+    // new:
+    image_urls: imageUrls,
     created_at: localItem.createdAt,
     updated_at: localItem.updatedAt,
   };
@@ -124,6 +155,11 @@ async function cloudUpdateStatus(itemId, status, updatedAtISO) {
     .from("items")
     .update({ status, updated_at: updatedAtISO })
     .eq("item_id", itemId);
+  if (error) throw error;
+}
+
+async function cloudUpdateItem(itemId, patch) {
+  const { error } = await supabase.from("items").update(patch).eq("item_id", itemId);
   if (error) throw error;
 }
 
@@ -147,23 +183,27 @@ async function cloudPullLatestAndMerge() {
     .from("items")
     .select("*")
     .order("updated_at", { ascending: false })
-    .limit(500);
+    .limit(800);
 
   if (error) throw error;
 
-  const cloudItems = (data || []).map((r) => ({
-    itemId: r.item_id,
-    designNo: r.design_no,
-    karat: r.karat,
-    grossWt: String(r.gross_wt ?? ""),
-    lessWt: String(r.less_wt ?? ""),
-    netWt: String(r.net_wt ?? ""),
-    notes: r.notes ?? "",
-    status: r.status ?? "IN_STOCK",
-    imageUrl: r.image_url ?? "",
-    createdAt: r.created_at ?? new Date().toISOString(),
-    updatedAt: r.updated_at ?? new Date().toISOString(),
-  }));
+  const cloudItems = (data || []).map((r) => {
+    const imageUrls = normalizeImageUrls(r);
+    return {
+      itemId: r.item_id,
+      designNo: r.design_no,
+      category: r.category ?? "",
+      karat: r.karat,
+      grossWt: String(r.gross_wt ?? ""),
+      lessWt: String(r.less_wt ?? ""),
+      netWt: String(r.net_wt ?? ""),
+      notes: r.notes ?? "",
+      status: r.status ?? "IN_STOCK",
+      imageUrls,
+      createdAt: r.created_at ?? new Date().toISOString(),
+      updatedAt: r.updated_at ?? new Date().toISOString(),
+    };
+  });
 
   const byId = new Map();
   for (const x of loadItems()) byId.set(x.itemId, x);
@@ -186,24 +226,17 @@ async function cloudPullLatestAndMerge() {
 
 // delete one item from cloud
 async function cloudDeleteItem(itemId) {
-  const { error } = await supabase
-    .from("items")
-    .delete()
-    .eq("item_id", itemId);
+  const { error } = await supabase.from("items").delete().eq("item_id", itemId);
   if (error) throw error;
 }
 
 // delete ALL items from cloud (testing / reset)
 async function cloudDeleteAllItems() {
-  const { error } = await supabase
-    .from("items")
-    .delete()
-    .neq("item_id", "");
+  const { error } = await supabase.from("items").delete().neq("item_id", "");
   if (error) throw error;
 }
 
 // ----------- TAG PREVIEW HELPER (NO BRIDGE) -----------
-
 function openTagPreview(item) {
   if (typeof window === "undefined") return;
 
@@ -220,12 +253,13 @@ function openTagPreview(item) {
 }
 
 // -------------------------------------------------------
-
 export default function AddPage() {
-  useRequireLogin(); // login guard
+  useRequireLogin();
   const router = useRouter();
+
   const [items, setItems] = useState([]);
   const [query, setQuery] = useState("");
+  const [categoryFilter, setCategoryFilter] = useState("ALL");
   const [qrOpen, setQrOpen] = useState(null);
 
   const [cloudMsg, setCloudMsg] = useState("");
@@ -233,17 +267,28 @@ export default function AddPage() {
 
   const [form, setForm] = useState({
     designNo: "",
+    category: CATEGORIES[0],
     karat: "22K",
     grossWt: "",
     lessWt: "",
     notes: "",
   });
 
-  const [photoFile, setPhotoFile] = useState(null);
-  const [photoPreview, setPhotoPreview] = useState(null);
+  // ✅ multiple photos
+  const [photoFiles, setPhotoFiles] = useState([]);
+  const [photoPreviews, setPhotoPreviews] = useState([]);
 
   // image zoom modal
   const [imageOpenUrl, setImageOpenUrl] = useState(null);
+
+  // ✅ Edit mode
+  const [editingId, setEditingId] = useState(null);
+
+  // ✅ Load more
+  const [visibleCount, setVisibleCount] = useState(PAGE_SIZE);
+
+  // ✅ Scan / paste itemID quick filter
+  const [scanId, setScanId] = useState("");
 
   // Initial load: local first, then cloud sync
   useEffect(() => {
@@ -275,7 +320,6 @@ export default function AddPage() {
     }
 
     init();
-
     return () => {
       cancelled = true;
     };
@@ -297,41 +341,184 @@ export default function AddPage() {
     setForm((p) => ({ ...p, [key]: value }));
   }
 
-  function onPhotoChange(e) {
-    const file = e.target.files && e.target.files[0];
-    if (!file) {
-      setPhotoFile(null);
-      setPhotoPreview((old) => {
-        if (old) URL.revokeObjectURL(old);
-        return null;
-      });
-      return;
+  function resetPhotosUI() {
+    // clear previews
+    setPhotoFiles([]);
+    setPhotoPreviews((old) => {
+      for (const u of old) {
+        try { URL.revokeObjectURL(u); } catch {}
+      }
+      return [];
+    });
+
+    // ✅ MUST: clear file input value
+    const inputEl = document.getElementById("itemPhotosInput");
+    if (inputEl) inputEl.value = "";
+  }
+
+  function onPhotosChange(e) {
+    const files = Array.from(e.target.files || []);
+    setPhotoFiles(files);
+
+    setPhotoPreviews((old) => {
+      for (const u of old) {
+        try { URL.revokeObjectURL(u); } catch {}
+      }
+      return files.map((f) => URL.createObjectURL(f));
+    });
+  }
+
+  async function uploadPhotosForItem(itemId, files) {
+    // returns array of public urls
+    const urls = [];
+    let idx = 0;
+
+    for (const f of files) {
+      const compressed = await compressImage(f);
+
+      const ts = Date.now();
+      const rand = Math.random().toString(36).slice(2, 8);
+      const path = `items/${itemId}/${ts}_${rand}_${idx}.jpg`;
+
+      const { error: uploadError } = await supabase.storage
+        .from(ITEMS_BUCKET)
+        .upload(path, compressed, {
+          upsert: false,
+          contentType: "image/jpeg",
+        });
+
+      if (!uploadError) {
+        const { data } = supabase.storage.from(ITEMS_BUCKET).getPublicUrl(path);
+        const baseUrl = (data && data.publicUrl) || "";
+        const url = baseUrl ? `${baseUrl}?v=${ts}` : "";
+        if (url) urls.push(url);
+      } else {
+        console.error(uploadError);
+      }
+
+      idx++;
     }
 
-    setPhotoFile(file);
-    const url = URL.createObjectURL(file);
-    setPhotoPreview((old) => {
-      if (old) URL.revokeObjectURL(old);
-      return url;
+    return urls;
+  }
+
+  function startEdit(item) {
+    setEditingId(item.itemId);
+    setForm({
+      designNo: item.designNo || "",
+      category: item.category || CATEGORIES[0],
+      karat: item.karat || "22K",
+      grossWt: item.grossWt || "",
+      lessWt: item.lessWt || "",
+      notes: item.notes || "",
     });
+    resetPhotosUI();
+    window.scrollTo({ top: 0, behavior: "smooth" });
+  }
+
+  function cancelEdit() {
+    setEditingId(null);
+    setForm({
+      designNo: "",
+      category: CATEGORIES[0],
+      karat: form.karat || "22K",
+      grossWt: "",
+      lessWt: "",
+      notes: "",
+    });
+    resetPhotosUI();
   }
 
   async function onSave(e) {
     e.preventDefault();
 
-    const itemId = nextItemId(items);
     const now = new Date().toISOString();
+
+    // ✅ If editing -> update existing item
+    if (editingId) {
+      const itemId = editingId;
+
+      // local patch
+      const patchLocal = {
+        designNo: form.designNo.trim(),
+        category: form.category,
+        karat: form.karat,
+        grossWt: form.grossWt.trim(),
+        lessWt: form.lessWt.trim() || "0",
+        netWt,
+        notes: form.notes.trim(),
+        updatedAt: now,
+      };
+
+      setItems((prev) =>
+        prev.map((x) => (x.itemId === itemId ? { ...x, ...patchLocal } : x))
+      );
+
+      // CLOUD
+      setCloudBusy(true);
+      setCloudMsg(`Updating ${itemId}...`);
+      try {
+        // If new photos selected -> upload and append
+        let newUrls = [];
+        if (photoFiles.length > 0) {
+          setCloudMsg("Uploading new photos...");
+          newUrls = await uploadPhotosForItem(itemId, photoFiles);
+        }
+
+        // Merge existing urls + new urls
+        const current = items.find((x) => x.itemId === itemId);
+        const existingUrls = Array.isArray(current?.imageUrls) ? current.imageUrls : [];
+        const mergedUrls = [...existingUrls, ...newUrls].filter(Boolean);
+
+        await cloudUpdateItem(itemId, {
+          design_no: patchLocal.designNo,
+          category: patchLocal.category,
+          karat: patchLocal.karat,
+          gross_wt: Number(patchLocal.grossWt || 0),
+          less_wt: Number(patchLocal.lessWt || 0),
+          net_wt: Number(patchLocal.netWt || 0),
+          notes: patchLocal.notes,
+          // keep status same
+          image_urls: mergedUrls,
+          image_url: mergedUrls[0] || null,
+          updated_at: now,
+        });
+
+        setItems((prev) =>
+          prev.map((x) =>
+            x.itemId === itemId ? { ...x, imageUrls: mergedUrls, updatedAt: now } : x
+          )
+        );
+
+        await cloudLogEvent({ itemId, action: "EDIT", actor: "Factory", place: "Local" });
+
+        setCloudMsg(`Updated ✅ (${itemId})`);
+        cancelEdit();
+      } catch (err) {
+        console.error(err);
+        setCloudMsg(`Update failed ⚠ (${itemId}) — check net/RLS`);
+      } finally {
+        setCloudBusy(false);
+        setTimeout(() => setCloudMsg(""), 2500);
+      }
+
+      return;
+    }
+
+    // ✅ New create
+    const itemId = nextItemId(items);
 
     const payload = {
       itemId,
       designNo: form.designNo.trim(),
+      category: form.category,
       karat: form.karat,
       grossWt: form.grossWt.trim(),
       lessWt: form.lessWt.trim() || "0",
       netWt,
       notes: form.notes.trim(),
       status: "IN_STOCK",
-      imageUrl: "",
+      imageUrls: [],
       createdAt: now,
       updatedAt: now,
     };
@@ -341,16 +528,15 @@ export default function AddPage() {
 
     setForm({
       designNo: "",
+      category: form.category, // keep last selected
       karat: form.karat,
       grossWt: "",
       lessWt: "",
       notes: "",
     });
-    setPhotoFile(null);
-    setPhotoPreview((old) => {
-      if (old) URL.revokeObjectURL(old);
-      return null;
-    });
+
+    // ✅ clear photos UI properly
+    resetPhotosUI();
 
     // CLOUD
     setCloudBusy(true);
@@ -364,49 +550,25 @@ export default function AddPage() {
         place: "Local",
       });
 
-      // ---------- UNIQUE PHOTO UPLOAD (FIX) ----------
-      if (photoFile) {
-        setCloudMsg("Uploading photo...");
+      // Upload photos (multiple)
+      if (photoFiles.length > 0) {
+        setCloudMsg("Uploading photos...");
+        const urls = await uploadPhotosForItem(itemId, photoFiles);
 
-        const compressed = await compressImage(photoFile);
-
-        // unique filename so purani image kabhi reuse na ho
-        const ts = Date.now();
-        const rand = Math.random().toString(36).slice(2, 8);
-        const path = `items/${itemId}_${ts}_${rand}.jpg`;
-
-        const { error: uploadError } = await supabase.storage
-          .from("item-images")
-          .upload(path, compressed, {
-            upsert: false, // unique name, overwrite ki zarurat nahi
-            contentType: "image/jpeg",
+        if (urls.length > 0) {
+          await cloudUpdateItem(itemId, {
+            image_urls: urls,
+            image_url: urls[0] || null,
+            updated_at: new Date().toISOString(),
           });
 
-        if (uploadError) {
-          console.error(uploadError);
-          setCloudMsg("Photo upload failed ⚠ — item saved without image");
-        } else {
-          const { data } = supabase.storage
-            .from("item-images")
-            .getPublicUrl(path);
-
-          // cache bust query param, just in case
-          const baseUrl = (data && data.publicUrl) || "";
-          const imageUrl = baseUrl ? `${baseUrl}?v=${ts}` : "";
-
-          await supabase
-            .from("items")
-            .update({
-              image_url: imageUrl,
-              updated_at: new Date().toISOString(),
-            })
-            .eq("item_id", itemId);
-
           setItems((prev) =>
-            prev.map((x) => (x.itemId === itemId ? { ...x, imageUrl } : x))
+            prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: urls } : x))
           );
 
-          setCloudMsg(`Saved + photo uploaded ✅ (${itemId})`);
+          setCloudMsg(`Saved + photos uploaded ✅ (${itemId})`);
+        } else {
+          setCloudMsg(`Saved ✅ (${itemId}) (photos failed/skipped)`);
         }
       } else {
         setCloudMsg(`Cloud saved ✅ (${itemId})`);
@@ -425,9 +587,7 @@ export default function AddPage() {
     const now = new Date().toISOString();
 
     setItems((prev) =>
-      prev.map((x) =>
-        x.itemId === itemId ? { ...x, status, updatedAt: now } : x
-      )
+      prev.map((x) => (x.itemId === itemId ? { ...x, status, updatedAt: now } : x))
     );
 
     setCloudBusy(true);
@@ -436,8 +596,7 @@ export default function AddPage() {
       await cloudUpdateStatus(itemId, status, now);
       await cloudLogEvent({
         itemId,
-        action:
-          status === "SOLD" ? "SOLD" : status === "RETURNED" ? "RETURN" : "IN",
+        action: status === "SOLD" ? "SOLD" : status === "RETURNED" ? "RETURN" : "IN",
         actor: "Factory",
         place: "Local",
       });
@@ -465,6 +624,7 @@ export default function AddPage() {
     try {
       await cloudDeleteItem(itemId);
       setCloudMsg(`Deleted ${itemId} (local + cloud)`);
+      if (editingId === itemId) cancelEdit();
     } catch {
       setCloudMsg(
         `Local deleted; cloud delete failed ⚠ (${itemId}) – Supabase RLS / net check karo.`
@@ -472,6 +632,43 @@ export default function AddPage() {
     } finally {
       setCloudBusy(false);
       setTimeout(() => setCloudMsg(""), 3000);
+    }
+  }
+
+  // delete one photo url from item (DB only; storage file stays)
+  async function deletePhotoUrl(itemId, urlToRemove) {
+    const ok = confirm("Remove this photo from item?");
+    if (!ok) return;
+
+    const now = new Date().toISOString();
+
+    const current = items.find((x) => x.itemId === itemId);
+    const existing = Array.isArray(current?.imageUrls) ? current.imageUrls : [];
+    const nextUrls = existing.filter((u) => u !== urlToRemove);
+
+    // local
+    setItems((prev) =>
+      prev.map((x) =>
+        x.itemId === itemId ? { ...x, imageUrls: nextUrls, updatedAt: now } : x
+      )
+    );
+
+    // cloud
+    setCloudBusy(true);
+    setCloudMsg("Updating photos...");
+    try {
+      await cloudUpdateItem(itemId, {
+        image_urls: nextUrls,
+        image_url: nextUrls[0] || null,
+        updated_at: now,
+      });
+      setCloudMsg("Photo removed ✅");
+    } catch (err) {
+      console.error(err);
+      setCloudMsg("Photo remove failed ⚠");
+    } finally {
+      setCloudBusy(false);
+      setTimeout(() => setCloudMsg(""), 2000);
     }
   }
 
@@ -493,10 +690,9 @@ export default function AddPage() {
     try {
       await cloudDeleteAllItems();
       setCloudMsg("All items deleted from cloud ✅");
+      cancelEdit();
     } catch {
-      setCloudMsg(
-        "Local cleared. Cloud delete failed ⚠ – Supabase RLS / net check karo."
-      );
+      setCloudMsg("Local cleared. Cloud delete failed ⚠ – Supabase RLS / net check karo.");
     } finally {
       setCloudBusy(false);
       setTimeout(() => setCloudMsg(""), 3500);
@@ -518,21 +714,44 @@ export default function AddPage() {
     }
   }
 
+  // ✅ filters
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
-    if (!q) return items;
-    return items.filter(
-      (x) =>
-        x.itemId.toLowerCase().includes(q) ||
-        String(x.designNo).toLowerCase().includes(q)
-    );
-  }, [items, query]);
+
+    return items.filter((x) => {
+      const matchQuery =
+        !q ||
+        (x.itemId || "").toLowerCase().includes(q) ||
+        String(x.designNo || "").toLowerCase().includes(q);
+
+      const matchCat = categoryFilter === "ALL" || (x.category || "") === categoryFilter;
+
+      return matchQuery && matchCat;
+    });
+  }, [items, query, categoryFilter]);
 
   const counts = useMemo(() => {
     const c = { IN_STOCK: 0, SOLD: 0, RETURNED: 0 };
     for (const x of items) c[x.status] = (c[x.status] || 0) + 1;
     return c;
   }, [items]);
+
+  // ✅ visible items with Load More
+  const visibleItems = useMemo(() => {
+    return filtered.slice(0, visibleCount);
+  }, [filtered, visibleCount]);
+
+  // reset visible when filters change
+  useEffect(() => {
+    setVisibleCount(PAGE_SIZE);
+  }, [query, categoryFilter, items.length]);
+
+  function onGoScan() {
+    const id = scanId.trim();
+    if (!id) return;
+    setQuery(id);
+    setScanId("");
+  }
 
   return (
     <main className="min-h-screen bg-black text-white">
@@ -542,10 +761,10 @@ export default function AddPage() {
           <div className="mb-4">
             <div className="flex items-start justify-between gap-3">
               <div>
-                <div className="text-sm tracking-widest text-white/70">
-                  ANNVI GOLD
-                </div>
-                <h1 className="mt-1 text-2xl font-semibold">Add Piece</h1>
+                <div className="text-sm tracking-widest text-white/70">ANNVI GOLD</div>
+                <h1 className="mt-1 text-2xl font-semibold">
+                  {editingId ? "Edit Piece" : "Add Piece"}
+                </h1>
                 <p className="mt-1 text-sm text-white/60">
                   ItemID auto + offline local save + QR (+ Cloud)
                 </p>
@@ -602,14 +821,45 @@ export default function AddPage() {
           </div>
 
           <form onSubmit={onSave} className="space-y-4">
-            <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm text-white/70">Next ItemID</div>
-                <div className="font-semibold">{nextItemId(items)}</div>
+            {!editingId ? (
+              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-white/70">Next ItemID</div>
+                  <div className="font-semibold">{nextItemId(items)}</div>
+                </div>
+                <div className="mt-1 text-xs text-white/45">Format: AG-YY-000001</div>
               </div>
-              <div className="mt-1 text-xs text-white/45">
-                Format: AG-YY-000001
+            ) : (
+              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-white/70">Editing ItemID</div>
+                  <div className="font-semibold">{editingId}</div>
+                </div>
+                <div className="mt-2 flex gap-2">
+                  <button
+                    type="button"
+                    onClick={cancelEdit}
+                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
+                  >
+                    Cancel Edit
+                  </button>
+                </div>
               </div>
+            )}
+
+            <div>
+              <label className="text-sm text-white/70">Category</label>
+              <select
+                value={form.category}
+                onChange={(e) => update("category", e.target.value)}
+                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+              >
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
             </div>
 
             <div>
@@ -652,9 +902,7 @@ export default function AddPage() {
               </div>
 
               <div>
-                <label className="text-sm text-white/70">
-                  Less Wt / Stone (g)
-                </label>
+                <label className="text-sm text-white/70">Less Wt / Stone (g)</label>
                 <input
                   value={form.lessWt}
                   onChange={(e) => update("lessWt", e.target.value)}
@@ -672,9 +920,7 @@ export default function AddPage() {
                   {netWt === "" ? "—" : `${netWt} g`}
                 </div>
               </div>
-              <div className="mt-1 text-xs text-white/50">
-                Net = Gross − Less
-              </div>
+              <div className="mt-1 text-xs text-white/50">Net = Gross − Less</div>
             </div>
 
             <div>
@@ -688,26 +934,29 @@ export default function AddPage() {
             </div>
 
             <div>
-              <label className="text-sm text-white/70">Photo (optional)</label>
+              <label className="text-sm text-white/70">
+                Photos (optional, multiple) — add more in Edit also
+              </label>
               <input
+                id="itemPhotosInput"
                 type="file"
                 accept="image/*;capture=camera"
-                onChange={onPhotoChange}
+                multiple
+                onChange={onPhotosChange}
                 className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
               />
-              {photoPreview ? (
-                <div className="mt-2 flex items-center gap-3">
-                  <div className="h-16 w-16 overflow-hidden rounded-lg border border-white/15 bg-black/40">
-                    <img
-                      src={photoPreview}
-                      alt="Preview"
-                      className="h-full w-full object-cover"
-                    />
-                  </div>
-                  <div className="text-xs text-white/50">
-                    Camera / gallery se aayi image compress hogi (approx ~100
-                    KB).
-                  </div>
+
+              {photoPreviews.length > 0 ? (
+                <div className="mt-2 grid grid-cols-5 gap-2">
+                  {photoPreviews.map((u, idx) => (
+                    <div
+                      key={u}
+                      className="h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-black/40"
+                      title="Selected"
+                    >
+                      <img src={u} alt={`p${idx}`} className="h-full w-full object-cover" />
+                    </div>
+                  ))}
                 </div>
               ) : null}
             </div>
@@ -716,131 +965,227 @@ export default function AddPage() {
               type="submit"
               className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90"
             >
-              Save Piece (offline)
+              {editingId ? "Update Piece" : "Save Piece (offline)"}
             </button>
           </form>
         </div>
 
         {/* Saved Pieces */}
         <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div className="flex items-center justify-between gap-3">
-            <h2 className="text-lg font-semibold">Saved Pieces</h2>
-            <input
-              value={query}
-              onChange={(e) => setQuery(e.target.value)}
-              placeholder="Search ItemID / Design"
-              className="w-48 rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-            />
+          <div className="flex flex-col gap-3">
+            <div className="flex items-center justify-between gap-3">
+              <h2 className="text-lg font-semibold">Saved Pieces</h2>
+            </div>
+
+            <div className="grid grid-cols-2 gap-2">
+              <input
+                value={query}
+                onChange={(e) => setQuery(e.target.value)}
+                placeholder="Search ItemID / Design"
+                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+              />
+
+              <select
+                value={categoryFilter}
+                onChange={(e) => setCategoryFilter(e.target.value)}
+                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+              >
+                <option value="ALL">All Categories</option>
+                {CATEGORIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+
+            <div className="grid grid-cols-[1fr_auto] gap-2">
+              <input
+                value={scanId}
+                onChange={(e) => setScanId(e.target.value)}
+                placeholder="Scan / Paste ItemID (AG-26-000123)"
+                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+              />
+              <button
+                type="button"
+                onClick={onGoScan}
+                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+              >
+                Go
+              </button>
+            </div>
           </div>
 
           <div className="mt-3 space-y-3">
-            {filtered.length === 0 ? (
+            {visibleItems.length === 0 ? (
               <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
                 No items yet.
               </div>
             ) : (
-              filtered.slice(0, 30).map((x) => (
-                <div
-                  key={x.itemId}
-                  className="rounded-2xl border border-white/10 bg-black/30 p-3"
-                >
-                  <div className="flex items-start justify-between gap-3">
-                    {/* LEFT SIDE: details + status buttons */}
-                    <div className="flex-1">
-                      <div className="text-sm text-white/60">ItemID</div>
-                      <div className="text-lg font-semibold">{x.itemId}</div>
-                      <div className="mt-1 text-sm text-white/70">
-                        D:{x.designNo} | {x.karat} | N:{x.netWt}g
-                      </div>
-                      <div className="mt-1 text-xs text-white/45">
-                        Status:{" "}
-                        <span className="font-semibold text-white/70">
-                          {x.status}
-                        </span>
-                      </div>
+              visibleItems.map((x) => {
+                const imageUrls = Array.isArray(x.imageUrls) ? x.imageUrls : [];
+                const firstImg = imageUrls[0] || "";
 
-                      <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                        <button
-                          type="button"
-                          onClick={() => setStatus(x.itemId, "SOLD")}
-                          className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
-                        >
-                          SOLD
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setStatus(x.itemId, "RETURNED")}
-                          className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
-                        >
-                          RETURN
-                        </button>
-                        <button
-                          type="button"
-                          onClick={() => setStatus(x.itemId, "IN_STOCK")}
-                          className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
-                        >
-                          IN
-                        </button>
-                      </div>
-                    </div>
+                return (
+                  <div
+                    key={x.itemId}
+                    className="rounded-2xl border border-white/10 bg-black/30 p-3"
+                  >
+                    <div className="flex items-start justify-between gap-3">
+                      {/* LEFT SIDE: details + status buttons */}
+                      <div className="flex-1">
+                        <div className="text-sm text-white/60">ItemID</div>
+                        <div className="text-lg font-semibold">{x.itemId}</div>
 
-                    {/* RIGHT SIDE: image (if any) + QR + Print / Delete */}
-                    <div className="flex flex-col items-end gap-2">
-                      {x.imageUrl ? (
-                        <div
-                          className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                          title="Tap to enlarge"
-                          onClick={() => setImageOpenUrl(x.imageUrl)}
-                        >
-                          <img
-                            src={x.imageUrl}
-                            alt={x.itemId}
-                            className="h-full w-full object-cover"
-                          />
+                        <div className="mt-1 text-xs text-white/60">
+                          Category:{" "}
+                          <span className="font-semibold text-white/80">
+                            {x.category || "—"}
+                          </span>
                         </div>
-                      ) : null}
 
-                      <div
-                        className="cursor-pointer rounded-lg bg-white p-2"
-                        title="Tap to enlarge QR"
-                        onClick={() => setQrOpen(x.itemId)}
-                      >
-                        <QRCode value={x.itemId} size={64} />
+                        <div className="mt-1 text-sm text-white/70">
+                          D:{x.designNo} | {x.karat} | N:{x.netWt}g
+                        </div>
+
+                        <div className="mt-1 text-xs text-white/45">
+                          Status:{" "}
+                          <span className="font-semibold text-white/70">
+                            {x.status}
+                          </span>
+                        </div>
+
+                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                          <button
+                            type="button"
+                            onClick={() => setStatus(x.itemId, "SOLD")}
+                            className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
+                          >
+                            SOLD
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setStatus(x.itemId, "RETURNED")}
+                            className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
+                          >
+                            RETURN
+                          </button>
+                          <button
+                            type="button"
+                            onClick={() => setStatus(x.itemId, "IN_STOCK")}
+                            className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
+                          >
+                            IN
+                          </button>
+
+                          {/* ✅ EDIT */}
+                          <button
+                            type="button"
+                            onClick={() => startEdit(x)}
+                            className="ml-auto rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/30"
+                          >
+                            EDIT
+                          </button>
+                        </div>
+
+                        {/* ✅ Thumbnails + delete individual photo */}
+                        {imageUrls.length > 0 ? (
+                          <div className="mt-3 grid grid-cols-5 gap-2">
+                            {imageUrls.slice(0, 10).map((u) => (
+                              <div key={u} className="relative">
+                                <div
+                                  className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                                  title="Tap to enlarge"
+                                  onClick={() => setImageOpenUrl(u)}
+                                >
+                                  <img
+                                    src={u}
+                                    alt="Item"
+                                    className="h-full w-full object-cover"
+                                  />
+                                </div>
+
+                                <button
+                                  type="button"
+                                  onClick={() => deletePhotoUrl(x.itemId, u)}
+                                  className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white"
+                                  title="Remove photo"
+                                >
+                                  ×
+                                </button>
+                              </div>
+                            ))}
+                          </div>
+                        ) : null}
                       </div>
 
-                      <div className="flex w-full flex-col gap-2">
-                        <button
-                          type="button"
-                          onClick={() => openTagPreview(x)}
-                          className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
-                        >
-                          Print Tag
-                        </button>
+                      {/* RIGHT SIDE: first image + QR + Print / Delete */}
+                      <div className="flex flex-col items-end gap-2">
+                        {firstImg ? (
+                          <div
+                            className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                            title="Tap to enlarge"
+                            onClick={() => setImageOpenUrl(firstImg)}
+                          >
+                            <img
+                              src={firstImg}
+                              alt={x.itemId}
+                              className="h-full w-full object-cover"
+                            />
+                          </div>
+                        ) : null}
 
-                        <button
-                          type="button"
-                          onClick={() => deleteItem(x.itemId)}
-                          className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                        <div
+                          className="cursor-pointer rounded-lg bg-white p-2"
+                          title="Tap to enlarge QR"
+                          onClick={() => setQrOpen(x.itemId)}
                         >
-                          DELETE
-                        </button>
+                          <QRCode value={x.itemId} size={64} />
+                        </div>
+
+                        <div className="flex w-full flex-col gap-2">
+                          <button
+                            type="button"
+                            onClick={() => openTagPreview(x)}
+                            className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
+                          >
+                            Print Tag
+                          </button>
+
+                          <button
+                            type="button"
+                            onClick={() => deleteItem(x.itemId)}
+                            className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                          >
+                            DELETE
+                          </button>
+                        </div>
                       </div>
                     </div>
+
+                    {x.notes ? (
+                      <div className="mt-2 text-xs text-white/50">Note: {x.notes}</div>
+                    ) : null}
                   </div>
-
-                  {x.notes ? (
-                    <div className="mt-2 text-xs text-white/50">
-                      Note: {x.notes}
-                    </div>
-                  ) : null}
-                </div>
-              ))
+                );
+              })
             )}
           </div>
 
+          {/* ✅ Load More */}
+          {filtered.length > visibleCount ? (
+            <button
+              type="button"
+              onClick={() => setVisibleCount((p) => p + PAGE_SIZE)}
+              className="mt-4 w-full rounded-xl border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white/80 hover:border-white/30"
+            >
+              Load More
+            </button>
+          ) : null}
+
           <div className="mt-3 text-xs text-white/40">
-            Showing max 30 items on screen. Data saved offline in this browser +
-            cloud synced.
+            Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} items.
+            Data saved offline in this browser + cloud synced.
           </div>
         </div>
       </div>
@@ -872,9 +1217,7 @@ export default function AddPage() {
 
             <div className="mt-3 text-center">
               <div className="text-lg font-semibold">{qrOpen}</div>
-              <div className="mt-1 text-xs text-white/50">
-                Scan this to fetch item by ItemID
-              </div>
+              <div className="mt-1 text-xs text-white/50">Scan this to fetch item by ItemID</div>
             </div>
           </div>
         </div>
