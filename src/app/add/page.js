@@ -105,16 +105,24 @@ function saveItems(items) {
   localStorage.setItem(STORAGE_KEY, JSON.stringify(items));
 }
 
+// ✅ FIX: nextItemId now uses MAX+1 (not length+1)
 function nextItemId(items) {
   const yy = getYear2();
-  const yearItems = items.filter((x) => x.itemId?.startsWith(`AG-${yy}-`));
-  const next = yearItems.length + 1;
-  return `AG-${yy}-${pad6(next)}`;
+  const prefix = `AG-${yy}-`;
+  let max = 0;
+
+  for (const x of items) {
+    const id = x?.itemId || "";
+    if (!id.startsWith(prefix)) continue;
+    const num = parseInt(id.slice(prefix.length), 10);
+    if (!Number.isNaN(num)) max = Math.max(max, num);
+  }
+
+  return `${prefix}${pad6(max + 1)}`;
 }
 
 // ---------- CLOUD HELPERS (Supabase) ----------
 function normalizeImageUrls(r) {
-  // Prefer image_urls (jsonb array), else fallback to image_url single.
   const arr = Array.isArray(r.image_urls) ? r.image_urls : [];
   if (arr.length > 0) return arr.filter(Boolean);
   if (r.image_url) return [r.image_url];
@@ -133,10 +141,8 @@ function toCloudRow(localItem) {
     net_wt: Number(localItem.netWt || 0),
     notes: localItem.notes || "",
     status: localItem.status,
-    // backward compatibility:
-    image_url: imageUrls[0] || null,
-    // new:
-    image_urls: imageUrls,
+    image_url: imageUrls[0] || null, // backward compatibility
+    image_urls: imageUrls, // new
     created_at: localItem.createdAt,
     updated_at: localItem.updatedAt,
   };
@@ -144,9 +150,7 @@ function toCloudRow(localItem) {
 
 async function cloudUpsertItem(localItem) {
   const row = toCloudRow(localItem);
-  const { error } = await supabase
-    .from("items")
-    .upsert(row, { onConflict: "item_id" });
+  const { error } = await supabase.from("items").upsert(row, { onConflict: "item_id" });
   if (error) throw error;
 }
 
@@ -219,9 +223,13 @@ async function cloudPullLatestAndMerge() {
     }
   }
 
-  return Array.from(byId.values()).sort(
-    (a, b) => new Date(b.updatedAt).getTime() - new Date(a.updatedAt).getTime()
-  );
+  // ✅ FIX: stable sort (no shuffle)
+  return Array.from(byId.values()).sort((a, b) => {
+    const ta = new Date(a.updatedAt || 0).getTime();
+    const tb = new Date(b.updatedAt || 0).getTime();
+    if (tb !== ta) return tb - ta;
+    return String(b.itemId).localeCompare(String(a.itemId));
+  });
 }
 
 // delete one item from cloud
@@ -252,6 +260,31 @@ function openTagPreview(item) {
   window.open(url.toString(), "_blank", "width=900,height=400");
 }
 
+// ----------- DATE HELPERS -----------
+function formatDT(iso) {
+  if (!iso) return "—";
+  try {
+    const d = new Date(iso);
+    return d.toLocaleString(undefined, {
+      year: "numeric",
+      month: "2-digit",
+      day: "2-digit",
+      hour: "2-digit",
+      minute: "2-digit",
+    });
+  } catch {
+    return iso;
+  }
+}
+function isoDateOnly(iso) {
+  if (!iso) return "";
+  try {
+    return new Date(iso).toISOString().slice(0, 10);
+  } catch {
+    return "";
+  }
+}
+
 // -------------------------------------------------------
 export default function AddPage() {
   useRequireLogin();
@@ -264,6 +297,13 @@ export default function AddPage() {
 
   const [cloudMsg, setCloudMsg] = useState("");
   const [cloudBusy, setCloudBusy] = useState(false);
+
+  // ✅ double save guard
+  const [savingLocal, setSavingLocal] = useState(false);
+
+  // ✅ Date filters (createdAt)
+  const [dateFrom, setDateFrom] = useState("");
+  const [dateTo, setDateTo] = useState("");
 
   const [form, setForm] = useState({
     designNo: "",
@@ -342,16 +382,16 @@ export default function AddPage() {
   }
 
   function resetPhotosUI() {
-    // clear previews
     setPhotoFiles([]);
     setPhotoPreviews((old) => {
       for (const u of old) {
-        try { URL.revokeObjectURL(u); } catch {}
+        try {
+          URL.revokeObjectURL(u);
+        } catch {}
       }
       return [];
     });
 
-    // ✅ MUST: clear file input value
     const inputEl = document.getElementById("itemPhotosInput");
     if (inputEl) inputEl.value = "";
   }
@@ -362,14 +402,15 @@ export default function AddPage() {
 
     setPhotoPreviews((old) => {
       for (const u of old) {
-        try { URL.revokeObjectURL(u); } catch {}
+        try {
+          URL.revokeObjectURL(u);
+        } catch {}
       }
       return files.map((f) => URL.createObjectURL(f));
     });
   }
 
   async function uploadPhotosForItem(itemId, files) {
-    // returns array of public urls
     const urls = [];
     let idx = 0;
 
@@ -432,14 +473,83 @@ export default function AddPage() {
   async function onSave(e) {
     e.preventDefault();
 
+    if (savingLocal || cloudBusy) return; // ✅ guard
+    setSavingLocal(true);
+
     const now = new Date().toISOString();
 
-    // ✅ If editing -> update existing item
-    if (editingId) {
-      const itemId = editingId;
+    try {
+      // ✅ If editing -> update existing item
+      if (editingId) {
+        const itemId = editingId;
 
-      // local patch
-      const patchLocal = {
+        const patchLocal = {
+          designNo: form.designNo.trim(),
+          category: form.category,
+          karat: form.karat,
+          grossWt: form.grossWt.trim(),
+          lessWt: form.lessWt.trim() || "0",
+          netWt,
+          notes: form.notes.trim(),
+          updatedAt: now,
+        };
+
+        setItems((prev) =>
+          prev.map((x) => (x.itemId === itemId ? { ...x, ...patchLocal } : x))
+        );
+
+        setCloudBusy(true);
+        setCloudMsg(`Updating ${itemId}...`);
+        try {
+          let newUrls = [];
+          if (photoFiles.length > 0) {
+            setCloudMsg("Uploading new photos...");
+            newUrls = await uploadPhotosForItem(itemId, photoFiles);
+          }
+
+          const current = items.find((x) => x.itemId === itemId);
+          const existingUrls = Array.isArray(current?.imageUrls) ? current.imageUrls : [];
+          const mergedUrls = [...existingUrls, ...newUrls].filter(Boolean);
+
+          await cloudUpdateItem(itemId, {
+            design_no: patchLocal.designNo,
+            category: patchLocal.category,
+            karat: patchLocal.karat,
+            gross_wt: Number(patchLocal.grossWt || 0),
+            less_wt: Number(patchLocal.lessWt || 0),
+            net_wt: Number(patchLocal.netWt || 0),
+            notes: patchLocal.notes,
+            image_urls: mergedUrls,
+            image_url: mergedUrls[0] || null,
+            updated_at: now,
+          });
+
+          setItems((prev) =>
+            prev.map((x) =>
+              x.itemId === itemId ? { ...x, imageUrls: mergedUrls, updatedAt: now } : x
+            )
+          );
+
+          await cloudLogEvent({ itemId, action: "EDIT", actor: "Factory", place: "Local" });
+
+          setCloudMsg(`Updated ✅ (${itemId})`);
+          cancelEdit();
+        } catch (err) {
+          console.error(err);
+          setCloudMsg(`Update failed ⚠ (${itemId}) — check net/RLS`);
+        } finally {
+          setCloudBusy(false);
+          setTimeout(() => setCloudMsg(""), 2500);
+        }
+
+        return;
+      }
+
+      // ✅ New create
+      const itemId = nextItemId(items);
+
+      const payload = {
+        itemId,
         designNo: form.designNo.trim(),
         category: form.category,
         karat: form.karat,
@@ -447,138 +557,74 @@ export default function AddPage() {
         lessWt: form.lessWt.trim() || "0",
         netWt,
         notes: form.notes.trim(),
+        status: "IN_STOCK",
+        imageUrls: [],
+        createdAt: now,
         updatedAt: now,
       };
 
-      setItems((prev) =>
-        prev.map((x) => (x.itemId === itemId ? { ...x, ...patchLocal } : x))
-      );
+      // IMPORTANT: copy files BEFORE reset UI (otherwise upload breaks)
+      const filesToUpload = [...photoFiles];
+
+      // LOCAL (dedupe by itemId)
+      setItems((prev) => [payload, ...prev.filter((x) => x.itemId !== itemId)]);
+
+      setForm({
+        designNo: "",
+        category: form.category,
+        karat: form.karat,
+        grossWt: "",
+        lessWt: "",
+        notes: "",
+      });
+
+      // ✅ clear photos UI properly (after copying files)
+      resetPhotosUI();
 
       // CLOUD
       setCloudBusy(true);
-      setCloudMsg(`Updating ${itemId}...`);
+      setCloudMsg("Saving to cloud...");
       try {
-        // If new photos selected -> upload and append
-        let newUrls = [];
-        if (photoFiles.length > 0) {
-          setCloudMsg("Uploading new photos...");
-          newUrls = await uploadPhotosForItem(itemId, photoFiles);
-        }
-
-        // Merge existing urls + new urls
-        const current = items.find((x) => x.itemId === itemId);
-        const existingUrls = Array.isArray(current?.imageUrls) ? current.imageUrls : [];
-        const mergedUrls = [...existingUrls, ...newUrls].filter(Boolean);
-
-        await cloudUpdateItem(itemId, {
-          design_no: patchLocal.designNo,
-          category: patchLocal.category,
-          karat: patchLocal.karat,
-          gross_wt: Number(patchLocal.grossWt || 0),
-          less_wt: Number(patchLocal.lessWt || 0),
-          net_wt: Number(patchLocal.netWt || 0),
-          notes: patchLocal.notes,
-          // keep status same
-          image_urls: mergedUrls,
-          image_url: mergedUrls[0] || null,
-          updated_at: now,
+        await cloudUpsertItem(payload);
+        await cloudLogEvent({
+          itemId,
+          action: "CREATE",
+          actor: "Factory",
+          place: "Local",
         });
 
-        setItems((prev) =>
-          prev.map((x) =>
-            x.itemId === itemId ? { ...x, imageUrls: mergedUrls, updatedAt: now } : x
-          )
-        );
+        // Upload photos (multiple)
+        if (filesToUpload.length > 0) {
+          setCloudMsg("Uploading photos...");
+          const urls = await uploadPhotosForItem(itemId, filesToUpload);
 
-        await cloudLogEvent({ itemId, action: "EDIT", actor: "Factory", place: "Local" });
+          if (urls.length > 0) {
+            await cloudUpdateItem(itemId, {
+              image_urls: urls,
+              image_url: urls[0] || null,
+              updated_at: new Date().toISOString(),
+            });
 
-        setCloudMsg(`Updated ✅ (${itemId})`);
-        cancelEdit();
+            setItems((prev) =>
+              prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: urls } : x))
+            );
+
+            setCloudMsg(`Saved + photos uploaded ✅ (${itemId})`);
+          } else {
+            setCloudMsg(`Saved ✅ (${itemId}) (photos failed/skipped)`);
+          }
+        } else {
+          setCloudMsg(`Cloud saved ✅ (${itemId})`);
+        }
       } catch (err) {
         console.error(err);
-        setCloudMsg(`Update failed ⚠ (${itemId}) — check net/RLS`);
+        setCloudMsg(`Cloud failed/offline ⚠️ (${itemId}) — local saved`);
       } finally {
         setCloudBusy(false);
         setTimeout(() => setCloudMsg(""), 2500);
       }
-
-      return;
-    }
-
-    // ✅ New create
-    const itemId = nextItemId(items);
-
-    const payload = {
-      itemId,
-      designNo: form.designNo.trim(),
-      category: form.category,
-      karat: form.karat,
-      grossWt: form.grossWt.trim(),
-      lessWt: form.lessWt.trim() || "0",
-      netWt,
-      notes: form.notes.trim(),
-      status: "IN_STOCK",
-      imageUrls: [],
-      createdAt: now,
-      updatedAt: now,
-    };
-
-    // LOCAL
-    setItems((prev) => [payload, ...prev]);
-
-    setForm({
-      designNo: "",
-      category: form.category, // keep last selected
-      karat: form.karat,
-      grossWt: "",
-      lessWt: "",
-      notes: "",
-    });
-
-    // ✅ clear photos UI properly
-    resetPhotosUI();
-
-    // CLOUD
-    setCloudBusy(true);
-    setCloudMsg("Saving to cloud...");
-    try {
-      await cloudUpsertItem(payload);
-      await cloudLogEvent({
-        itemId,
-        action: "CREATE",
-        actor: "Factory",
-        place: "Local",
-      });
-
-      // Upload photos (multiple)
-      if (photoFiles.length > 0) {
-        setCloudMsg("Uploading photos...");
-        const urls = await uploadPhotosForItem(itemId, photoFiles);
-
-        if (urls.length > 0) {
-          await cloudUpdateItem(itemId, {
-            image_urls: urls,
-            image_url: urls[0] || null,
-            updated_at: new Date().toISOString(),
-          });
-
-          setItems((prev) =>
-            prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: urls } : x))
-          );
-
-          setCloudMsg(`Saved + photos uploaded ✅ (${itemId})`);
-        } else {
-          setCloudMsg(`Saved ✅ (${itemId}) (photos failed/skipped)`);
-        }
-      } else {
-        setCloudMsg(`Cloud saved ✅ (${itemId})`);
-      }
-    } catch (err) {
-      console.error(err);
-      setCloudMsg(`Cloud failed/offline ⚠️ (${itemId}) — local saved`);
     } finally {
-      setCloudBusy(false);
-      setTimeout(() => setCloudMsg(""), 2500);
+      setSavingLocal(false);
     }
   }
 
@@ -646,14 +692,12 @@ export default function AddPage() {
     const existing = Array.isArray(current?.imageUrls) ? current.imageUrls : [];
     const nextUrls = existing.filter((u) => u !== urlToRemove);
 
-    // local
     setItems((prev) =>
       prev.map((x) =>
         x.itemId === itemId ? { ...x, imageUrls: nextUrls, updatedAt: now } : x
       )
     );
 
-    // cloud
     setCloudBusy(true);
     setCloudMsg("Updating photos...");
     try {
@@ -672,7 +716,6 @@ export default function AddPage() {
     }
   }
 
-  // Clear Data = local + cloud wipe (testing)
   async function clearAll() {
     const a = confirm(
       "Ye action sab items delete karega (LOCAL + CLOUD). Mostly testing ke liye. Continue?"
@@ -714,9 +757,12 @@ export default function AddPage() {
     }
   }
 
-  // ✅ filters
+  // ✅ filters (query + category + date range)
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+
+    const from = dateFrom ? new Date(dateFrom + "T00:00:00").getTime() : null;
+    const to = dateTo ? new Date(dateTo + "T23:59:59").getTime() : null;
 
     return items.filter((x) => {
       const matchQuery =
@@ -726,9 +772,13 @@ export default function AddPage() {
 
       const matchCat = categoryFilter === "ALL" || (x.category || "") === categoryFilter;
 
-      return matchQuery && matchCat;
+      const t = new Date(x.createdAt || x.updatedAt || 0).getTime();
+      const matchFrom = from === null || t >= from;
+      const matchTo = to === null || t <= to;
+
+      return matchQuery && matchCat && matchFrom && matchTo;
     });
-  }, [items, query, categoryFilter]);
+  }, [items, query, categoryFilter, dateFrom, dateTo]);
 
   const counts = useMemo(() => {
     const c = { IN_STOCK: 0, SOLD: 0, RETURNED: 0 };
@@ -736,15 +786,13 @@ export default function AddPage() {
     return c;
   }, [items]);
 
-  // ✅ visible items with Load More
   const visibleItems = useMemo(() => {
     return filtered.slice(0, visibleCount);
   }, [filtered, visibleCount]);
 
-  // reset visible when filters change
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [query, categoryFilter, items.length]);
+  }, [query, categoryFilter, dateFrom, dateTo, items.length]);
 
   function onGoScan() {
     const id = scanId.trim();
@@ -755,437 +803,464 @@ export default function AddPage() {
 
   return (
     <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-md px-4 py-8">
-        {/* Add Piece Card */}
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
-          <div className="mb-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm tracking-widest text-white/70">ANNVI GOLD</div>
-                <h1 className="mt-1 text-2xl font-semibold">
-                  {editingId ? "Edit Piece" : "Add Piece"}
-                </h1>
-                <p className="mt-1 text-sm text-white/60">
-                  ItemID auto + offline local save + QR (+ Cloud)
-                </p>
+      {/* ✅ Responsive wrapper: laptop pe wide */}
+      <div className="mx-auto w-full max-w-md px-4 py-8 md:max-w-3xl lg:max-w-6xl">
+        {/* ✅ Desktop layout: 2 columns */}
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-[420px_1fr] lg:items-start">
+          {/* Add Piece Card */}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
+            <div className="mb-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm tracking-widest text-white/70">ANNVI GOLD</div>
+                  <h1 className="mt-1 text-2xl font-semibold">
+                    {editingId ? "Edit Piece" : "Add Piece"}
+                  </h1>
+                  <p className="mt-1 text-sm text-white/60">
+                    ItemID auto + offline local save + QR (+ Cloud)
+                  </p>
 
-                {cloudMsg ? (
-                  <div className="mt-2 text-xs text-white/60">
-                    {cloudBusy ? "⏳ " : "✅ "}
-                    {cloudMsg}
-                  </div>
-                ) : null}
-              </div>
-
-              <div className="flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={() => doLogout(router)}
-                  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
-                >
-                  Logout
-                </button>
-
-                <button
-                  onClick={refreshFromCloud}
-                  className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/30"
-                  type="button"
-                >
-                  Refresh Cloud
-                </button>
-
-                <button
-                  onClick={clearAll}
-                  className="rounded-lg border border-red-500/50 bg-black/30 px-3 py-2 text-xs text-red-200 hover:border-red-500/80"
-                  type="button"
-                >
-                  Clear Data (ALL)
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">IN</div>
-                <div className="text-lg font-semibold">{counts.IN_STOCK}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">SOLD</div>
-                <div className="text-lg font-semibold">{counts.SOLD}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">RET</div>
-                <div className="text-lg font-semibold">{counts.RETURNED}</div>
-              </div>
-            </div>
-          </div>
-
-          <form onSubmit={onSave} className="space-y-4">
-            {!editingId ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-white/70">Next ItemID</div>
-                  <div className="font-semibold">{nextItemId(items)}</div>
+                  {cloudMsg ? (
+                    <div className="mt-2 text-xs text-white/60">
+                      {cloudBusy ? "⏳ " : "✅ "}
+                      {cloudMsg}
+                    </div>
+                  ) : null}
                 </div>
-                <div className="mt-1 text-xs text-white/45">Format: AG-YY-000001</div>
-              </div>
-            ) : (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-white/70">Editing ItemID</div>
-                  <div className="font-semibold">{editingId}</div>
-                </div>
-                <div className="mt-2 flex gap-2">
+
+                <div className="flex flex-col gap-2">
                   <button
                     type="button"
-                    onClick={cancelEdit}
-                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
+                    onClick={() => doLogout(router)}
+                    className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
                   >
-                    Cancel Edit
+                    Logout
+                  </button>
+
+                  <button
+                    onClick={refreshFromCloud}
+                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/30"
+                    type="button"
+                  >
+                    Refresh Cloud
+                  </button>
+
+                  <button
+                    onClick={clearAll}
+                    className="rounded-lg border border-red-500/50 bg-black/30 px-3 py-2 text-xs text-red-200 hover:border-red-500/80"
+                    type="button"
+                  >
+                    Clear Data (ALL)
                   </button>
                 </div>
               </div>
-            )}
 
-            <div>
-              <label className="text-sm text-white/70">Category</label>
-              <select
-                value={form.category}
-                onChange={(e) => update("category", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">IN</div>
+                  <div className="text-lg font-semibold">{counts.IN_STOCK}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">SOLD</div>
+                  <div className="text-lg font-semibold">{counts.SOLD}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">RET</div>
+                  <div className="text-lg font-semibold">{counts.RETURNED}</div>
+                </div>
+              </div>
             </div>
 
-            <div>
-              <label className="text-sm text-white/70">Design No</label>
-              <input
-                value={form.designNo}
-                onChange={(e) => update("designNo", e.target.value)}
-                placeholder="e.g. 8123"
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-                required
-              />
-            </div>
+            <form onSubmit={onSave} className="space-y-4">
+              {!editingId ? (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-white/70">Next ItemID</div>
+                    <div className="font-semibold">{nextItemId(items)}</div>
+                  </div>
+                  <div className="mt-1 text-xs text-white/45">Format: AG-YY-000001</div>
+                  <div className="mt-1 text-xs text-white/50">
+                    Today: <span className="font-semibold">{formatDT(new Date().toISOString())}</span>
+                  </div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-white/70">Editing ItemID</div>
+                    <div className="font-semibold">{editingId}</div>
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="rounded-lg border border-white/15 bg-black/30 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
+                    >
+                      Cancel Edit
+                    </button>
+                  </div>
+                </div>
+              )}
 
-            <div>
-              <label className="text-sm text-white/70">Karat</label>
-              <select
-                value={form.karat}
-                onChange={(e) => update("karat", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              >
-                <option>22K</option>
-                <option>20K</option>
-                <option>18K</option>
-                <option>14K</option>
-                <option>9K</option>
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm text-white/70">Gross Wt (g)</label>
+                <label className="text-sm text-white/70">Category</label>
+                <select
+                  value={form.category}
+                  onChange={(e) => update("category", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                >
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-sm text-white/70">Design No</label>
                 <input
-                  value={form.grossWt}
-                  onChange={(e) => update("grossWt", e.target.value)}
-                  placeholder="e.g. 3.540"
-                  inputMode="decimal"
+                  value={form.designNo}
+                  onChange={(e) => update("designNo", e.target.value)}
+                  placeholder="e.g. 8123"
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                   required
                 />
               </div>
 
               <div>
-                <label className="text-sm text-white/70">Less Wt / Stone (g)</label>
+                <label className="text-sm text-white/70">Karat</label>
+                <select
+                  value={form.karat}
+                  onChange={(e) => update("karat", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                >
+                  <option>22K</option>
+                  <option>20K</option>
+                  <option>18K</option>
+                  <option>14K</option>
+                  <option>9K</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm text-white/70">Gross Wt (g)</label>
+                  <input
+                    value={form.grossWt}
+                    onChange={(e) => update("grossWt", e.target.value)}
+                    placeholder="e.g. 3.540"
+                    inputMode="decimal"
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm text-white/70">Less Wt / Stone (g)</label>
+                  <input
+                    value={form.lessWt}
+                    onChange={(e) => update("lessWt", e.target.value)}
+                    placeholder="e.g. 0.300"
+                    inputMode="decimal"
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-white/70">Net Weight (auto)</div>
+                  <div className="text-xl font-semibold">
+                    {netWt === "" ? "—" : `${netWt} g`}
+                  </div>
+                </div>
+                <div className="mt-1 text-xs text-white/50">Net = Gross − Less</div>
+              </div>
+
+              <div>
+                <label className="text-sm text-white/70">Notes (optional)</label>
                 <input
-                  value={form.lessWt}
-                  onChange={(e) => update("lessWt", e.target.value)}
-                  placeholder="e.g. 0.300"
-                  inputMode="decimal"
+                  value={form.notes}
+                  onChange={(e) => update("notes", e.target.value)}
+                  placeholder="optional"
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                 />
               </div>
-            </div>
 
-            <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm text-white/70">Net Weight (auto)</div>
-                <div className="text-xl font-semibold">
-                  {netWt === "" ? "—" : `${netWt} g`}
+              <div>
+                <label className="text-sm text-white/70">
+                  Photos (optional, multiple) — add more in Edit also
+                </label>
+                <input
+                  id="itemPhotosInput"
+                  type="file"
+                  accept="image/*;capture=camera"
+                  multiple
+                  onChange={onPhotosChange}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
+                />
+
+                {photoPreviews.length > 0 ? (
+                  <div className="mt-2 grid grid-cols-5 gap-2">
+                    {photoPreviews.map((u, idx) => (
+                      <div
+                        key={u}
+                        className="h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-black/40"
+                        title="Selected"
+                      >
+                        <img src={u} alt={`p${idx}`} className="h-full w-full object-cover" />
+                      </div>
+                    ))}
+                  </div>
+                ) : null}
+              </div>
+
+              <button
+                type="submit"
+                disabled={savingLocal || cloudBusy}
+                className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90 disabled:opacity-60"
+              >
+                {editingId ? "Update Piece" : "Save Piece (offline)"}
+              </button>
+            </form>
+          </div>
+
+          {/* Saved Pieces */}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold">Saved Pieces</h2>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search ItemID / Design"
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                />
+
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                >
+                  <option value="ALL">All Categories</option>
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              {/* ✅ Date filters */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <div className="mb-1 text-xs text-white/55">From Date</div>
+                  <input
+                    type="date"
+                    value={dateFrom}
+                    onChange={(e) => setDateFrom(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  />
+                </div>
+                <div>
+                  <div className="mb-1 text-xs text-white/55">To Date</div>
+                  <input
+                    type="date"
+                    value={dateTo}
+                    onChange={(e) => setDateTo(e.target.value)}
+                    className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  />
                 </div>
               </div>
-              <div className="mt-1 text-xs text-white/50">Net = Gross − Less</div>
+
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <input
+                  value={scanId}
+                  onChange={(e) => setScanId(e.target.value)}
+                  placeholder="Scan / Paste ItemID (AG-26-000123)"
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                />
+                <button
+                  type="button"
+                  onClick={onGoScan}
+                  className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+                >
+                  Go
+                </button>
+              </div>
             </div>
 
-            <div>
-              <label className="text-sm text-white/70">Notes (optional)</label>
-              <input
-                value={form.notes}
-                onChange={(e) => update("notes", e.target.value)}
-                placeholder="optional"
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-white/70">
-                Photos (optional, multiple) — add more in Edit also
-              </label>
-              <input
-                id="itemPhotosInput"
-                type="file"
-                accept="image/*;capture=camera"
-                multiple
-                onChange={onPhotosChange}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
-              />
-
-              {photoPreviews.length > 0 ? (
-                <div className="mt-2 grid grid-cols-5 gap-2">
-                  {photoPreviews.map((u, idx) => (
-                    <div
-                      key={u}
-                      className="h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-black/40"
-                      title="Selected"
-                    >
-                      <img src={u} alt={`p${idx}`} className="h-full w-full object-cover" />
-                    </div>
-                  ))}
+            <div className="mt-3 space-y-3">
+              {visibleItems.length === 0 ? (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
+                  No items yet.
                 </div>
-              ) : null}
+              ) : (
+                visibleItems.map((x) => {
+                  const imageUrls = Array.isArray(x.imageUrls) ? x.imageUrls : [];
+                  const firstImg = imageUrls[0] || "";
+                  const savedOn = x.createdAt || x.updatedAt;
+
+                  return (
+                    <div
+                      key={x.itemId}
+                      className="rounded-2xl border border-white/10 bg-black/30 p-3"
+                    >
+                      <div className="flex items-start justify-between gap-3">
+                        {/* LEFT SIDE */}
+                        <div className="flex-1">
+                          <div className="text-sm text-white/60">ItemID</div>
+                          <div className="text-lg font-semibold">{x.itemId}</div>
+
+                          <div className="mt-1 text-xs text-white/60">
+                            Category:{" "}
+                            <span className="font-semibold text-white/80">
+                              {x.category || "—"}
+                            </span>
+                          </div>
+
+                          <div className="mt-1 text-xs text-white/55">
+                            Saved On:{" "}
+                            <span className="font-semibold text-white/75">
+                              {formatDT(savedOn)}
+                            </span>
+                          </div>
+
+                          <div className="mt-1 text-sm text-white/70">
+                            D:{x.designNo} | {x.karat} | N:{x.netWt}g
+                          </div>
+
+                          <div className="mt-1 text-xs text-white/45">
+                            Status:{" "}
+                            <span className="font-semibold text-white/70">{x.status}</span>
+                          </div>
+
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "SOLD")}
+                              className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
+                            >
+                              SOLD
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "RETURNED")}
+                              className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
+                            >
+                              RETURN
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "IN_STOCK")}
+                              className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
+                            >
+                              IN
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => startEdit(x)}
+                              className="ml-auto rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/30"
+                            >
+                              EDIT
+                            </button>
+                          </div>
+
+                          {/* thumbnails + remove */}
+                          {imageUrls.length > 0 ? (
+                            <div className="mt-3 grid grid-cols-5 gap-2">
+                              {imageUrls.slice(0, 10).map((u) => (
+                                <div key={u} className="relative">
+                                  <div
+                                    className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                                    title="Tap to enlarge"
+                                    onClick={() => setImageOpenUrl(u)}
+                                  >
+                                    <img src={u} alt="Item" className="h-full w-full object-cover" />
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => deletePhotoUrl(x.itemId, u)}
+                                    className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white"
+                                    title="Remove photo"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {/* RIGHT SIDE */}
+                        <div className="flex flex-col items-end gap-2">
+                          {firstImg ? (
+                            <div
+                              className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                              title="Tap to enlarge"
+                              onClick={() => setImageOpenUrl(firstImg)}
+                            >
+                              <img src={firstImg} alt={x.itemId} className="h-full w-full object-cover" />
+                            </div>
+                          ) : null}
+
+                          <div
+                            className="cursor-pointer rounded-lg bg-white p-2"
+                            title="Tap to enlarge QR"
+                            onClick={() => setQrOpen(x.itemId)}
+                          >
+                            <QRCode value={x.itemId} size={64} />
+                          </div>
+
+                          <div className="flex w-full flex-col gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openTagPreview(x)}
+                              className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
+                            >
+                              Print Tag
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => deleteItem(x.itemId)}
+                              className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                            >
+                              DELETE
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {x.notes ? (
+                        <div className="mt-2 text-xs text-white/50">Note: {x.notes}</div>
+                      ) : null}
+                    </div>
+                  );
+                })
+              )}
             </div>
 
-            <button
-              type="submit"
-              className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90"
-            >
-              {editingId ? "Update Piece" : "Save Piece (offline)"}
-            </button>
-          </form>
-        </div>
-
-        {/* Saved Pieces */}
-        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Saved Pieces</h2>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search ItemID / Design"
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              />
-
-              <select
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              >
-                <option value="ALL">All Categories</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-[1fr_auto] gap-2">
-              <input
-                value={scanId}
-                onChange={(e) => setScanId(e.target.value)}
-                placeholder="Scan / Paste ItemID (AG-26-000123)"
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              />
+            {/* Load More */}
+            {filtered.length > visibleCount ? (
               <button
                 type="button"
-                onClick={onGoScan}
-                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+                onClick={() => setVisibleCount((p) => p + PAGE_SIZE)}
+                className="mt-4 w-full rounded-xl border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white/80 hover:border-white/30"
               >
-                Go
+                Load More
               </button>
+            ) : null}
+
+            <div className="mt-3 text-xs text-white/40">
+              Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} items.
+              Data saved offline in this browser + cloud synced.
             </div>
-          </div>
-
-          <div className="mt-3 space-y-3">
-            {visibleItems.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
-                No items yet.
-              </div>
-            ) : (
-              visibleItems.map((x) => {
-                const imageUrls = Array.isArray(x.imageUrls) ? x.imageUrls : [];
-                const firstImg = imageUrls[0] || "";
-
-                return (
-                  <div
-                    key={x.itemId}
-                    className="rounded-2xl border border-white/10 bg-black/30 p-3"
-                  >
-                    <div className="flex items-start justify-between gap-3">
-                      {/* LEFT SIDE: details + status buttons */}
-                      <div className="flex-1">
-                        <div className="text-sm text-white/60">ItemID</div>
-                        <div className="text-lg font-semibold">{x.itemId}</div>
-
-                        <div className="mt-1 text-xs text-white/60">
-                          Category:{" "}
-                          <span className="font-semibold text-white/80">
-                            {x.category || "—"}
-                          </span>
-                        </div>
-
-                        <div className="mt-1 text-sm text-white/70">
-                          D:{x.designNo} | {x.karat} | N:{x.netWt}g
-                        </div>
-
-                        <div className="mt-1 text-xs text-white/45">
-                          Status:{" "}
-                          <span className="font-semibold text-white/70">
-                            {x.status}
-                          </span>
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "SOLD")}
-                            className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
-                          >
-                            SOLD
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "RETURNED")}
-                            className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
-                          >
-                            RETURN
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "IN_STOCK")}
-                            className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
-                          >
-                            IN
-                          </button>
-
-                          {/* ✅ EDIT */}
-                          <button
-                            type="button"
-                            onClick={() => startEdit(x)}
-                            className="ml-auto rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/30"
-                          >
-                            EDIT
-                          </button>
-                        </div>
-
-                        {/* ✅ Thumbnails + delete individual photo */}
-                        {imageUrls.length > 0 ? (
-                          <div className="mt-3 grid grid-cols-5 gap-2">
-                            {imageUrls.slice(0, 10).map((u) => (
-                              <div key={u} className="relative">
-                                <div
-                                  className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                                  title="Tap to enlarge"
-                                  onClick={() => setImageOpenUrl(u)}
-                                >
-                                  <img
-                                    src={u}
-                                    alt="Item"
-                                    className="h-full w-full object-cover"
-                                  />
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={() => deletePhotoUrl(x.itemId, u)}
-                                  className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white"
-                                  title="Remove photo"
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
-                      </div>
-
-                      {/* RIGHT SIDE: first image + QR + Print / Delete */}
-                      <div className="flex flex-col items-end gap-2">
-                        {firstImg ? (
-                          <div
-                            className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                            title="Tap to enlarge"
-                            onClick={() => setImageOpenUrl(firstImg)}
-                          >
-                            <img
-                              src={firstImg}
-                              alt={x.itemId}
-                              className="h-full w-full object-cover"
-                            />
-                          </div>
-                        ) : null}
-
-                        <div
-                          className="cursor-pointer rounded-lg bg-white p-2"
-                          title="Tap to enlarge QR"
-                          onClick={() => setQrOpen(x.itemId)}
-                        >
-                          <QRCode value={x.itemId} size={64} />
-                        </div>
-
-                        <div className="flex w-full flex-col gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openTagPreview(x)}
-                            className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
-                          >
-                            Print Tag
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => deleteItem(x.itemId)}
-                            className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
-                          >
-                            DELETE
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {x.notes ? (
-                      <div className="mt-2 text-xs text-white/50">Note: {x.notes}</div>
-                    ) : null}
-                  </div>
-                );
-              })
-            )}
-          </div>
-
-          {/* ✅ Load More */}
-          {filtered.length > visibleCount ? (
-            <button
-              type="button"
-              onClick={() => setVisibleCount((p) => p + PAGE_SIZE)}
-              className="mt-4 w-full rounded-xl border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white/80 hover:border-white/30"
-            >
-              Load More
-            </button>
-          ) : null}
-
-          <div className="mt-3 text-xs text-white/40">
-            Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} items.
-            Data saved offline in this browser + cloud synced.
           </div>
         </div>
       </div>
@@ -1245,11 +1320,7 @@ export default function AddPage() {
             </div>
 
             <div className="mt-3 flex items-center justify-center rounded-xl bg-black">
-              <img
-                src={imageOpenUrl}
-                alt="Item"
-                className="max-h-[70vh] w-auto object-contain"
-              />
+              <img src={imageOpenUrl} alt="Item" className="max-h-[70vh] w-auto object-contain" />
             </div>
           </div>
         </div>
