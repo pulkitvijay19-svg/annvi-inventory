@@ -251,6 +251,32 @@ function openBulkTags(ids) {
   window.open(url.toString(), "_blank");
 }
 
+// ✅ date helpers
+function fmtDT(iso) {
+  if (!iso) return "—";
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return "—";
+  return d.toLocaleString("en-IN", {
+    day: "2-digit",
+    month: "short",
+    year: "2-digit",
+    hour: "2-digit",
+    minute: "2-digit",
+  });
+}
+
+// inclusive range (date-only inputs)
+function startOfDayISO(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + "T00:00:00");
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+function endOfDayISO(dateStr) {
+  if (!dateStr) return null;
+  const d = new Date(dateStr + "T23:59:59");
+  return Number.isNaN(d.getTime()) ? null : d.toISOString();
+}
+
 export default function AddPage() {
   useRequireLogin();
   const router = useRouter();
@@ -290,6 +316,10 @@ export default function AddPage() {
 
   // ✅ BULK selection
   const [selectedIds, setSelectedIds] = useState(new Set());
+
+  // ✅ DATE FILTERS (Saved pieces)
+  const [fromDate, setFromDate] = useState(""); // yyyy-mm-dd
+  const [toDate, setToDate] = useState(""); // yyyy-mm-dd
 
   useEffect(() => {
     let cancelled = false;
@@ -381,10 +411,12 @@ export default function AddPage() {
       const rand = Math.random().toString(36).slice(2, 8);
       const path = `items/${itemId}/${ts}_${rand}_${idx}.jpg`;
 
-      const { error: uploadError } = await supabase.storage.from(ITEMS_BUCKET).upload(path, compressed, {
-        upsert: false,
-        contentType: "image/jpeg",
-      });
+      const { error: uploadError } = await supabase.storage
+        .from(ITEMS_BUCKET)
+        .upload(path, compressed, {
+          upsert: false,
+          contentType: "image/jpeg",
+        });
 
       if (!uploadError) {
         const { data } = supabase.storage.from(ITEMS_BUCKET).getPublicUrl(path);
@@ -447,7 +479,9 @@ export default function AddPage() {
         updatedAt: now,
       };
 
-      setItems((prev) => prev.map((x) => (x.itemId === itemId ? { ...x, ...patchLocal } : x)));
+      setItems((prev) =>
+        prev.map((x) => (x.itemId === itemId ? { ...x, ...patchLocal } : x))
+      );
 
       setCloudBusy(true);
       setCloudMsg(`Updating ${itemId}...`);
@@ -476,7 +510,9 @@ export default function AddPage() {
         });
 
         setItems((prev) =>
-          prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: mergedUrls, updatedAt: now } : x))
+          prev.map((x) =>
+            x.itemId === itemId ? { ...x, imageUrls: mergedUrls, updatedAt: now } : x
+          )
         );
 
         await cloudLogEvent({ itemId, action: "EDIT", actor: "Factory", place: "Local" });
@@ -507,8 +543,8 @@ export default function AddPage() {
       notes: form.notes.trim(),
       status: "IN_STOCK",
       imageUrls: [],
-      createdAt: now,
-      updatedAt: now,
+      createdAt: now, // ✅ auto date
+      updatedAt: now, // ✅ auto date
     };
 
     setItems((prev) => [payload, ...prev]);
@@ -541,7 +577,9 @@ export default function AddPage() {
             updated_at: new Date().toISOString(),
           });
 
-          setItems((prev) => prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: urls } : x)));
+          setItems((prev) =>
+            prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: urls } : x))
+          );
 
           setCloudMsg(`Saved + photos uploaded ✅ (${itemId})`);
         } else {
@@ -562,7 +600,9 @@ export default function AddPage() {
   async function setStatus(itemId, status) {
     const now = new Date().toISOString();
 
-    setItems((prev) => prev.map((x) => (x.itemId === itemId ? { ...x, status, updatedAt: now } : x)));
+    setItems((prev) =>
+      prev.map((x) => (x.itemId === itemId ? { ...x, status, updatedAt: now } : x))
+    );
 
     setCloudBusy(true);
     setCloudMsg("Syncing status to cloud...");
@@ -606,7 +646,9 @@ export default function AddPage() {
         return n;
       });
     } catch {
-      setCloudMsg(`Local deleted; cloud delete failed ⚠ (${itemId}) – Supabase RLS / net check karo.`);
+      setCloudMsg(
+        `Local deleted; cloud delete failed ⚠ (${itemId}) – Supabase RLS / net check karo.`
+      );
     } finally {
       setCloudBusy(false);
       setTimeout(() => setCloudMsg(""), 3000);
@@ -624,7 +666,9 @@ export default function AddPage() {
     const nextUrls = existing.filter((u) => u !== urlToRemove);
 
     setItems((prev) =>
-      prev.map((x) => (x.itemId === itemId ? { ...x, imageUrls: nextUrls, updatedAt: now } : x))
+      prev.map((x) =>
+        x.itemId === itemId ? { ...x, imageUrls: nextUrls, updatedAt: now } : x
+      )
     );
 
     setCloudBusy(true);
@@ -646,7 +690,9 @@ export default function AddPage() {
   }
 
   async function clearAll() {
-    const a = confirm("Ye action sab items delete karega (LOCAL + CLOUD). Mostly testing ke liye. Continue?");
+    const a = confirm(
+      "Ye action sab items delete karega (LOCAL + CLOUD). Mostly testing ke liye. Continue?"
+    );
     if (!a) return;
     const b = confirm("Pakka 100% sure? Ye undo nahi hoga.");
     if (!b) return;
@@ -685,8 +731,12 @@ export default function AddPage() {
     }
   }
 
+  // ✅ filters (query+category+date)
   const filtered = useMemo(() => {
     const q = query.trim().toLowerCase();
+
+    const fromISO = startOfDayISO(fromDate);
+    const toISO = endOfDayISO(toDate);
 
     return items.filter((x) => {
       const matchQuery =
@@ -695,9 +745,26 @@ export default function AddPage() {
         String(x.designNo || "").toLowerCase().includes(q);
 
       const matchCat = categoryFilter === "ALL" || (x.category || "") === categoryFilter;
-      return matchQuery && matchCat;
+
+      // date filter (by createdAt)
+      const cISO = x.createdAt || x.updatedAt || "";
+      const cTime = cISO ? new Date(cISO).getTime() : NaN;
+
+      let matchDate = true;
+      if (fromISO) {
+        const f = new Date(fromISO).getTime();
+        if (!Number.isNaN(cTime) && cTime < f) matchDate = false;
+        if (Number.isNaN(cTime)) matchDate = false;
+      }
+      if (toISO) {
+        const t = new Date(toISO).getTime();
+        if (!Number.isNaN(cTime) && cTime > t) matchDate = false;
+        if (Number.isNaN(cTime)) matchDate = false;
+      }
+
+      return matchQuery && matchCat && matchDate;
     });
-  }, [items, query, categoryFilter]);
+  }, [items, query, categoryFilter, fromDate, toDate]);
 
   const counts = useMemo(() => {
     const c = { IN_STOCK: 0, SOLD: 0, RETURNED: 0 };
@@ -709,7 +776,7 @@ export default function AddPage() {
 
   useEffect(() => {
     setVisibleCount(PAGE_SIZE);
-  }, [query, categoryFilter, items.length]);
+  }, [query, categoryFilter, fromDate, toDate, items.length]);
 
   function onGoScan() {
     const id = scanId.trim();
@@ -747,433 +814,487 @@ export default function AddPage() {
 
   return (
     <main className="min-h-screen bg-black text-white">
-      <div className="mx-auto max-w-md px-4 py-8">
-        {/* Add Piece Card */}
-        <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
-          <div className="mb-4">
-            <div className="flex items-start justify-between gap-3">
-              <div>
-                <div className="text-sm tracking-widest text-white/70">ANNVI GOLD</div>
-                <h1 className="mt-1 text-2xl font-semibold">{editingId ? "Edit Piece" : "Add Piece"}</h1>
-                <p className="mt-1 text-sm text-white/60">ItemID auto + offline local save + QR (+ Cloud)</p>
+      {/* ✅ DESKTOP FIX: max-w-md हटाया, responsive wrapper */}
+      <div className="mx-auto max-w-6xl px-4 py-8">
+        {/* ✅ DESKTOP FIX: 2-column on large screens */}
+        <div className="grid grid-cols-1 gap-5 lg:grid-cols-2 lg:gap-6">
+          {/* Add Piece Card */}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-5 shadow-sm">
+            <div className="mb-4">
+              <div className="flex items-start justify-between gap-3">
+                <div>
+                  <div className="text-sm tracking-widest text-white/70">ANNVI GOLD</div>
+                  <h1 className="mt-1 text-2xl font-semibold">
+                    {editingId ? "Edit Piece" : "Add Piece"}
+                  </h1>
+                  <p className="mt-1 text-sm text-white/60">
+                    ItemID auto + offline local save + QR (+ Cloud)
+                  </p>
 
-                {cloudMsg ? (
-                  <div className="mt-2 text-xs text-white/60">
-                    {cloudBusy ? "⏳ " : "✅ "}
-                    {cloudMsg}
+                  {/* ✅ show auto date/time hint */}
+                  <div className="mt-1 text-xs text-white/45">
+                    Auto Date/Time: system se (created_at / updated_at)
                   </div>
-                ) : null}
-              </div>
 
-              <div className="flex flex-col gap-2">
-                <button
-                  type="button"
-                  onClick={() => doLogout(router)}
-                  className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
-                >
-                  Logout
-                </button>
-
-                <button
-                  onClick={refreshFromCloud}
-                  className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/30"
-                  type="button"
-                >
-                  Refresh Cloud
-                </button>
-
-                <button
-                  onClick={clearAll}
-                  className="rounded-lg border border-red-500/50 bg-black/30 px-3 py-2 text-xs text-red-200 hover:border-red-500/80"
-                  type="button"
-                >
-                  Clear Data (ALL)
-                </button>
-              </div>
-            </div>
-
-            <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">IN</div>
-                <div className="text-lg font-semibold">{counts.IN_STOCK}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">SOLD</div>
-                <div className="text-lg font-semibold">{counts.SOLD}</div>
-              </div>
-              <div className="rounded-xl border border-white/10 bg-black/30 p-2">
-                <div className="text-white/50">RET</div>
-                <div className="text-lg font-semibold">{counts.RETURNED}</div>
-              </div>
-            </div>
-          </div>
-
-          <form onSubmit={onSave} className="space-y-4">
-            {!editingId ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-white/70">Next ItemID</div>
-                  <div className="font-semibold">{nextItemId(items)}</div>
+                  {cloudMsg ? (
+                    <div className="mt-2 text-xs text-white/60">
+                      {cloudBusy ? "⏳ " : "✅ "}
+                      {cloudMsg}
+                    </div>
+                  ) : null}
                 </div>
-                <div className="mt-1 text-xs text-white/45">Format: AG-YY-000001</div>
-              </div>
-            ) : (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-                <div className="flex items-center justify-between">
-                  <div className="text-sm text-white/70">Editing ItemID</div>
-                  <div className="font-semibold">{editingId}</div>
-                </div>
-                <div className="mt-2 flex gap-2">
+
+                <div className="flex flex-col gap-2">
                   <button
                     type="button"
-                    onClick={cancelEdit}
-                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
+                    onClick={() => doLogout(router)}
+                    className="rounded-lg border border-white/20 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/40"
                   >
-                    Cancel Edit
+                    Logout
+                  </button>
+
+                  <button
+                    onClick={refreshFromCloud}
+                    className="rounded-lg border border-white/15 bg-black/30 px-3 py-2 text-xs text-white/70 hover:border-white/30"
+                    type="button"
+                  >
+                    Refresh Cloud
+                  </button>
+
+                  <button
+                    onClick={clearAll}
+                    className="rounded-lg border border-red-500/50 bg-black/30 px-3 py-2 text-xs text-red-200 hover:border-red-500/80"
+                    type="button"
+                  >
+                    Clear Data (ALL)
                   </button>
                 </div>
               </div>
-            )}
 
-            <div>
-              <label className="text-sm text-white/70">Category</label>
-              <select
-                value={form.category}
-                onChange={(e) => update("category", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              >
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
+              <div className="mt-3 grid grid-cols-3 gap-2 text-center text-xs">
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">IN</div>
+                  <div className="text-lg font-semibold">{counts.IN_STOCK}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">SOLD</div>
+                  <div className="text-lg font-semibold">{counts.SOLD}</div>
+                </div>
+                <div className="rounded-xl border border-white/10 bg-black/30 p-2">
+                  <div className="text-white/50">RET</div>
+                  <div className="text-lg font-semibold">{counts.RETURNED}</div>
+                </div>
+              </div>
             </div>
 
-            <div>
-              <label className="text-sm text-white/70">Design No</label>
-              <input
-                value={form.designNo}
-                onChange={(e) => update("designNo", e.target.value)}
-                placeholder="e.g. 8123"
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-                required
-              />
-            </div>
+            <form onSubmit={onSave} className="space-y-4">
+              {!editingId ? (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-white/70">Next ItemID</div>
+                    <div className="font-semibold">{nextItemId(items)}</div>
+                  </div>
+                  <div className="mt-1 text-xs text-white/45">Format: AG-YY-000001</div>
+                </div>
+              ) : (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                  <div className="flex items-center justify-between">
+                    <div className="text-sm text-white/70">Editing ItemID</div>
+                    <div className="font-semibold">{editingId}</div>
+                  </div>
+                  <div className="mt-2 flex gap-2">
+                    <button
+                      type="button"
+                      onClick={cancelEdit}
+                      className="rounded-lg border border-white/15 bg-black/30 px-3 py-1.5 text-xs text-white/70 hover:border-white/30"
+                    >
+                      Cancel Edit
+                    </button>
+                  </div>
+                </div>
+              )}
 
-            <div>
-              <label className="text-sm text-white/70">Karat</label>
-              <select
-                value={form.karat}
-                onChange={(e) => update("karat", e.target.value)}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              >
-                <option>22K</option>
-                <option>20K</option>
-                <option>18K</option>
-                <option>14K</option>
-                <option>9K</option>
-              </select>
-            </div>
-
-            <div className="grid grid-cols-2 gap-3">
               <div>
-                <label className="text-sm text-white/70">Gross Wt (g)</label>
+                <label className="text-sm text-white/70">Category</label>
+                <select
+                  value={form.category}
+                  onChange={(e) => update("category", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                >
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div>
+                <label className="text-sm text-white/70">Design No</label>
                 <input
-                  value={form.grossWt}
-                  onChange={(e) => update("grossWt", e.target.value)}
-                  placeholder="e.g. 3.540"
-                  inputMode="decimal"
+                  value={form.designNo}
+                  onChange={(e) => update("designNo", e.target.value)}
+                  placeholder="e.g. 8123"
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                   required
                 />
               </div>
 
               <div>
-                <label className="text-sm text-white/70">Less Wt / Stone (g)</label>
+                <label className="text-sm text-white/70">Karat</label>
+                <select
+                  value={form.karat}
+                  onChange={(e) => update("karat", e.target.value)}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                >
+                  <option>22K</option>
+                  <option>20K</option>
+                  <option>18K</option>
+                  <option>14K</option>
+                  <option>9K</option>
+                </select>
+              </div>
+
+              <div className="grid grid-cols-2 gap-3">
+                <div>
+                  <label className="text-sm text-white/70">Gross Wt (g)</label>
+                  <input
+                    value={form.grossWt}
+                    onChange={(e) => update("grossWt", e.target.value)}
+                    placeholder="e.g. 3.540"
+                    inputMode="decimal"
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                    required
+                  />
+                </div>
+
+                <div>
+                  <label className="text-sm text-white/70">Less Wt / Stone (g)</label>
+                  <input
+                    value={form.lessWt}
+                    onChange={(e) => update("lessWt", e.target.value)}
+                    placeholder="e.g. 0.300"
+                    inputMode="decimal"
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
+                  />
+                </div>
+              </div>
+
+              <div className="rounded-xl border border-white/10 bg-black/30 p-3">
+                <div className="flex items-center justify-between">
+                  <div className="text-sm text-white/70">Net Weight (auto)</div>
+                  <div className="text-xl font-semibold">{netWt === "" ? "—" : `${netWt} g`}</div>
+                </div>
+                <div className="mt-1 text-xs text-white/50">Net = Gross − Less</div>
+              </div>
+
+              <div>
+                <label className="text-sm text-white/70">Notes (optional)</label>
                 <input
-                  value={form.lessWt}
-                  onChange={(e) => update("lessWt", e.target.value)}
-                  placeholder="e.g. 0.300"
-                  inputMode="decimal"
+                  value={form.notes}
+                  onChange={(e) => update("notes", e.target.value)}
+                  placeholder="optional"
                   className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
                 />
               </div>
-            </div>
 
-            <div className="rounded-xl border border-white/10 bg-black/30 p-3">
-              <div className="flex items-center justify-between">
-                <div className="text-sm text-white/70">Net Weight (auto)</div>
-                <div className="text-xl font-semibold">{netWt === "" ? "—" : `${netWt} g`}</div>
-              </div>
-              <div className="mt-1 text-xs text-white/50">Net = Gross − Less</div>
-            </div>
+              <div>
+                <label className="text-sm text-white/70">
+                  Photos (optional, multiple) — add more in Edit also
+                </label>
+                <input
+                  id="itemPhotosInput"
+                  type="file"
+                  accept="image/*;capture=camera"
+                  multiple
+                  onChange={onPhotosChange}
+                  className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
+                />
 
-            <div>
-              <label className="text-sm text-white/70">Notes (optional)</label>
-              <input
-                value={form.notes}
-                onChange={(e) => update("notes", e.target.value)}
-                placeholder="optional"
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 outline-none focus:border-white/30"
-              />
-            </div>
-
-            <div>
-              <label className="text-sm text-white/70">Photos (optional, multiple) — add more in Edit also</label>
-              <input
-                id="itemPhotosInput"
-                type="file"
-                accept="image/*;capture=camera"
-                multiple
-                onChange={onPhotosChange}
-                className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-xs outline-none file:mr-3 file:rounded-lg file:border-0 file:bg-white file:px-3 file:py-1 file:text-xs file:font-semibold file:text-black hover:border-white/30"
-              />
-
-              {photoPreviews.length > 0 ? (
-                <div className="mt-2 grid grid-cols-5 gap-2">
-                  {photoPreviews.map((u, idx) => (
-                    <div key={u} className="h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-black/40">
-                      <img src={u} alt={`p${idx}`} className="h-full w-full object-cover" />
-                    </div>
-                  ))}
-                </div>
-              ) : null}
-            </div>
-
-            <button type="submit" className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90">
-              {editingId ? "Update Piece" : "Save Piece (offline)"}
-            </button>
-          </form>
-        </div>
-
-        {/* Saved Pieces */}
-        <div className="mt-5 rounded-2xl border border-white/10 bg-white/5 p-4">
-          <div className="flex flex-col gap-3">
-            <div className="flex items-center justify-between gap-3">
-              <h2 className="text-lg font-semibold">Saved Pieces</h2>
-            </div>
-
-            {/* ✅ BULK BAR */}
-            <div className="grid grid-cols-3 gap-2">
-              <button
-                type="button"
-                onClick={printSelected}
-                className="rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black hover:bg-white/90"
-              >
-                Print Selected ({selectedIds.size})
-              </button>
-              <button
-                type="button"
-                onClick={selectAllFiltered}
-                className="rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs font-semibold text-white/80 hover:border-white/30"
-              >
-                Select All (Filtered)
-              </button>
-              <button
-                type="button"
-                onClick={clearSelection}
-                className="rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs font-semibold text-white/80 hover:border-white/30"
-              >
-                Clear
-              </button>
-            </div>
-
-            <div className="grid grid-cols-2 gap-2">
-              <input
-                value={query}
-                onChange={(e) => setQuery(e.target.value)}
-                placeholder="Search ItemID / Design"
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              />
-
-              <select
-                value={categoryFilter}
-                onChange={(e) => setCategoryFilter(e.target.value)}
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              >
-                <option value="ALL">All Categories</option>
-                {CATEGORIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </select>
-            </div>
-
-            <div className="grid grid-cols-[1fr_auto] gap-2">
-              <input
-                value={scanId}
-                onChange={(e) => setScanId(e.target.value)}
-                placeholder="Scan / Paste ItemID (AG-26-000123)"
-                className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
-              />
-              <button
-                type="button"
-                onClick={onGoScan}
-                className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
-              >
-                Go
-              </button>
-            </div>
-          </div>
-
-          <div className="mt-3 space-y-3">
-            {visibleItems.length === 0 ? (
-              <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">No items yet.</div>
-            ) : (
-              visibleItems.map((x) => {
-                const imageUrls = Array.isArray(x.imageUrls) ? x.imageUrls : [];
-                const firstImg = imageUrls[0] || "";
-
-                return (
-                  <div key={x.itemId} className="rounded-2xl border border-white/10 bg-black/30 p-3">
-                    <div className="flex items-start justify-between gap-3">
-                      {/* LEFT SIDE */}
-                      <div className="flex-1">
-                        {/* ✅ checkbox */}
-                        <label className="mb-2 inline-flex items-center gap-2 text-xs text-white/70">
-                          <input
-                            type="checkbox"
-                            checked={selectedIds.has(x.itemId)}
-                            onChange={() => toggleSelect(x.itemId)}
-                          />
-                          Select for bulk print
-                        </label>
-
-                        <div className="text-sm text-white/60">ItemID</div>
-                        <div className="text-lg font-semibold">{x.itemId}</div>
-
-                        <div className="mt-1 text-xs text-white/60">
-                          Category: <span className="font-semibold text-white/80">{x.category || "—"}</span>
-                        </div>
-
-                        <div className="mt-1 text-sm text-white/70">
-                          D:{x.designNo} | {x.karat} | N:{x.netWt}g
-                        </div>
-
-                        <div className="mt-1 text-xs text-white/45">
-                          Status: <span className="font-semibold text-white/70">{x.status}</span>
-                        </div>
-
-                        <div className="mt-2 flex flex-wrap gap-2 text-xs">
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "SOLD")}
-                            className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
-                          >
-                            SOLD
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "RETURNED")}
-                            className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
-                          >
-                            RETURN
-                          </button>
-                          <button
-                            type="button"
-                            onClick={() => setStatus(x.itemId, "IN_STOCK")}
-                            className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
-                          >
-                            IN
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => startEdit(x)}
-                            className="ml-auto rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/30"
-                          >
-                            EDIT
-                          </button>
-                        </div>
-
-                        {imageUrls.length > 0 ? (
-                          <div className="mt-3 grid grid-cols-5 gap-2">
-                            {imageUrls.slice(0, 10).map((u) => (
-                              <div key={u} className="relative">
-                                <div
-                                  className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                                  onClick={() => setImageOpenUrl(u)}
-                                >
-                                  <img src={u} alt="Item" className="h-full w-full object-cover" />
-                                </div>
-
-                                <button
-                                  type="button"
-                                  onClick={() => deletePhotoUrl(x.itemId, u)}
-                                  className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white"
-                                >
-                                  ×
-                                </button>
-                              </div>
-                            ))}
-                          </div>
-                        ) : null}
+                {photoPreviews.length > 0 ? (
+                  <div className="mt-2 grid grid-cols-5 gap-2">
+                    {photoPreviews.map((u, idx) => (
+                      <div
+                        key={u}
+                        className="h-14 w-14 overflow-hidden rounded-lg border border-white/15 bg-black/40"
+                      >
+                        <img src={u} alt={`p${idx}`} className="h-full w-full object-cover" />
                       </div>
-
-                      {/* RIGHT SIDE */}
-                      <div className="flex flex-col items-end gap-2">
-                        {firstImg ? (
-                          <div
-                            className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
-                            onClick={() => setImageOpenUrl(firstImg)}
-                          >
-                            <img src={firstImg} alt={x.itemId} className="h-full w-full object-cover" />
-                          </div>
-                        ) : null}
-
-                        <div className="cursor-pointer rounded-lg bg-white p-2" onClick={() => setQrOpen(x.itemId)}>
-                          <QRCode value={x.itemId} size={64} />
-                        </div>
-
-                        <div className="flex w-full flex-col gap-2">
-                          <button
-                            type="button"
-                            onClick={() => openTagPreview(x)}
-                            className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
-                          >
-                            Print Tag
-                          </button>
-
-                          <button
-                            type="button"
-                            onClick={() => deleteItem(x.itemId)}
-                            className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
-                          >
-                            DELETE
-                          </button>
-                        </div>
-                      </div>
-                    </div>
-
-                    {x.notes ? <div className="mt-2 text-xs text-white/50">Note: {x.notes}</div> : null}
+                    ))}
                   </div>
-                );
-              })
-            )}
+                ) : null}
+              </div>
+
+              <button
+                type="submit"
+                className="w-full rounded-xl bg-white px-4 py-2 font-semibold text-black hover:bg-white/90"
+              >
+                {editingId ? "Update Piece" : "Save Piece (offline)"}
+              </button>
+            </form>
           </div>
 
-          {filtered.length > visibleCount ? (
-            <button
-              type="button"
-              onClick={() => setVisibleCount((p) => p + PAGE_SIZE)}
-              className="mt-4 w-full rounded-xl border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white/80 hover:border-white/30"
-            >
-              Load More
-            </button>
-          ) : null}
+          {/* Saved Pieces */}
+          <div className="rounded-2xl border border-white/10 bg-white/5 p-4">
+            <div className="flex flex-col gap-3">
+              <div className="flex items-center justify-between gap-3">
+                <h2 className="text-lg font-semibold">Saved Pieces</h2>
+              </div>
 
-          <div className="mt-3 text-xs text-white/40">
-            Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} items. Data saved offline in this browser
-            + cloud synced.
+              {/* ✅ BULK BAR */}
+              <div className="grid grid-cols-3 gap-2">
+                <button
+                  type="button"
+                  onClick={printSelected}
+                  className="rounded-xl bg-white px-3 py-2 text-xs font-semibold text-black hover:bg-white/90"
+                >
+                  Print Selected ({selectedIds.size})
+                </button>
+                <button
+                  type="button"
+                  onClick={selectAllFiltered}
+                  className="rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs font-semibold text-white/80 hover:border-white/30"
+                >
+                  Select All (Filtered)
+                </button>
+                <button
+                  type="button"
+                  onClick={clearSelection}
+                  className="rounded-xl border border-white/15 bg-black/40 px-3 py-2 text-xs font-semibold text-white/80 hover:border-white/30"
+                >
+                  Clear
+                </button>
+              </div>
+
+              {/* ✅ DATE FILTER BAR */}
+              <div className="grid grid-cols-2 gap-2">
+                <div>
+                  <label className="text-xs text-white/60">From Date</label>
+                  <input
+                    type="date"
+                    value={fromDate}
+                    onChange={(e) => setFromDate(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  />
+                </div>
+                <div>
+                  <label className="text-xs text-white/60">To Date</label>
+                  <input
+                    type="date"
+                    value={toDate}
+                    onChange={(e) => setToDate(e.target.value)}
+                    className="mt-1 w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                  />
+                </div>
+              </div>
+
+              <div className="grid grid-cols-2 gap-2">
+                <input
+                  value={query}
+                  onChange={(e) => setQuery(e.target.value)}
+                  placeholder="Search ItemID / Design"
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                />
+
+                <select
+                  value={categoryFilter}
+                  onChange={(e) => setCategoryFilter(e.target.value)}
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                >
+                  <option value="ALL">All Categories</option>
+                  {CATEGORIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </select>
+              </div>
+
+              <div className="grid grid-cols-[1fr_auto] gap-2">
+                <input
+                  value={scanId}
+                  onChange={(e) => setScanId(e.target.value)}
+                  placeholder="Scan / Paste ItemID (AG-26-000123)"
+                  className="w-full rounded-xl border border-white/10 bg-black/40 px-3 py-2 text-sm outline-none focus:border-white/30"
+                />
+                <button
+                  type="button"
+                  onClick={onGoScan}
+                  className="rounded-xl bg-white px-4 py-2 text-sm font-semibold text-black hover:bg-white/90"
+                >
+                  Go
+                </button>
+              </div>
+            </div>
+
+            <div className="mt-3 space-y-3">
+              {visibleItems.length === 0 ? (
+                <div className="rounded-xl border border-white/10 bg-black/30 p-3 text-sm text-white/60">
+                  No items yet.
+                </div>
+              ) : (
+                visibleItems.map((x) => {
+                  const imageUrls = Array.isArray(x.imageUrls) ? x.imageUrls : [];
+                  const firstImg = imageUrls[0] || "";
+
+                  return (
+                    <div key={x.itemId} className="rounded-2xl border border-white/10 bg-black/30 p-3">
+                      <div className="flex items-start justify-between gap-3">
+                        {/* LEFT SIDE */}
+                        <div className="flex-1">
+                          {/* ✅ checkbox */}
+                          <label className="mb-2 inline-flex items-center gap-2 text-xs text-white/70">
+                            <input
+                              type="checkbox"
+                              checked={selectedIds.has(x.itemId)}
+                              onChange={() => toggleSelect(x.itemId)}
+                            />
+                            Select for bulk print
+                          </label>
+
+                          <div className="text-sm text-white/60">ItemID</div>
+                          <div className="text-lg font-semibold">{x.itemId}</div>
+
+                          <div className="mt-1 text-xs text-white/60">
+                            Category:{" "}
+                            <span className="font-semibold text-white/80">{x.category || "—"}</span>
+                          </div>
+
+                          {/* ✅ created date show */}
+                          <div className="mt-1 text-xs text-white/45">
+                            Saved: <span className="font-semibold text-white/70">{fmtDT(x.createdAt)}</span>
+                          </div>
+
+                          <div className="mt-1 text-sm text-white/70">
+                            D:{x.designNo} | {x.karat} | N:{x.netWt}g
+                          </div>
+
+                          <div className="mt-1 text-xs text-white/45">
+                            Status: <span className="font-semibold text-white/70">{x.status}</span>
+                          </div>
+
+                          <div className="mt-2 flex flex-wrap gap-2 text-xs">
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "SOLD")}
+                              className="rounded-lg bg-white px-3 py-1.5 font-semibold text-black hover:bg-white/90"
+                            >
+                              SOLD
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "RETURNED")}
+                              className="rounded-lg border border-white/20 bg-transparent px-3 py-1.5 font-semibold text-white/80 hover:border-white/40"
+                            >
+                              RETURN
+                            </button>
+                            <button
+                              type="button"
+                              onClick={() => setStatus(x.itemId, "IN_STOCK")}
+                              className="rounded-lg border border-white/10 bg-black/40 px-3 py-1.5 text-white/70 hover:border-white/30"
+                            >
+                              IN
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => startEdit(x)}
+                              className="ml-auto rounded-lg border border-white/15 bg-black/40 px-3 py-1.5 text-xs font-semibold text-white/80 hover:border-white/30"
+                            >
+                              EDIT
+                            </button>
+                          </div>
+
+                          {imageUrls.length > 0 ? (
+                            <div className="mt-3 grid grid-cols-5 gap-2">
+                              {imageUrls.slice(0, 10).map((u) => (
+                                <div key={u} className="relative">
+                                  <div
+                                    className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                                    onClick={() => setImageOpenUrl(u)}
+                                  >
+                                    <img src={u} alt="Item" className="h-full w-full object-cover" />
+                                  </div>
+
+                                  <button
+                                    type="button"
+                                    onClick={() => deletePhotoUrl(x.itemId, u)}
+                                    className="absolute -right-2 -top-2 rounded-full bg-red-600 px-2 py-0.5 text-[10px] font-bold text-white"
+                                  >
+                                    ×
+                                  </button>
+                                </div>
+                              ))}
+                            </div>
+                          ) : null}
+                        </div>
+
+                        {/* RIGHT SIDE */}
+                        <div className="flex flex-col items-end gap-2">
+                          {firstImg ? (
+                            <div
+                              className="h-14 w-14 cursor-pointer overflow-hidden rounded-lg border border-white/20 bg-black/40"
+                              onClick={() => setImageOpenUrl(firstImg)}
+                            >
+                              <img src={firstImg} alt={x.itemId} className="h-full w-full object-cover" />
+                            </div>
+                          ) : null}
+
+                          <div className="cursor-pointer rounded-lg bg-white p-2" onClick={() => setQrOpen(x.itemId)}>
+                            <QRCode value={x.itemId} size={64} />
+                          </div>
+
+                          <div className="flex w-full flex-col gap-2">
+                            <button
+                              type="button"
+                              onClick={() => openTagPreview(x)}
+                              className="w-full rounded-lg bg-white px-3 py-1.5 text-xs font-semibold text-black hover:bg-white/90"
+                            >
+                              Print Tag
+                            </button>
+
+                            <button
+                              type="button"
+                              onClick={() => deleteItem(x.itemId)}
+                              className="w-full rounded-lg border border-red-500/60 bg-transparent px-3 py-1.5 text-xs font-semibold text-red-300 hover:bg-red-500/10"
+                            >
+                              DELETE
+                            </button>
+                          </div>
+                        </div>
+                      </div>
+
+                      {x.notes ? <div className="mt-2 text-xs text-white/50">Note: {x.notes}</div> : null}
+                    </div>
+                  );
+                })
+              )}
+            </div>
+
+            {filtered.length > visibleCount ? (
+              <button
+                type="button"
+                onClick={() => setVisibleCount((p) => p + PAGE_SIZE)}
+                className="mt-4 w-full rounded-xl border border-white/15 bg-black/40 px-4 py-2 text-sm font-semibold text-white/80 hover:border-white/30"
+              >
+                Load More
+              </button>
+            ) : null}
+
+            <div className="mt-3 text-xs text-white/40">
+              Showing {Math.min(visibleCount, filtered.length)} of {filtered.length} items. Data saved offline in this browser
+              + cloud synced.
+            </div>
           </div>
         </div>
       </div>
 
       {/* QR Modal */}
       {qrOpen ? (
-        <div className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4" onClick={() => setQrOpen(null)}>
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/70 p-4"
+          onClick={() => setQrOpen(null)}
+        >
           <div
             className="w-full max-w-sm rounded-2xl border border-white/10 bg-black p-4"
             onClick={(e) => e.stopPropagation()}
